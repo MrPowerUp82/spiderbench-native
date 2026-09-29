@@ -15,4 +15,4 @@ scene.traverse(o => {
   const e = by.get(k) || { n: 0, t: 0, b: 0, vis: 0 }; e.n++; e.t += t; e.b += b; e.vis += o.visible ? 1 : 0; by.set(k, e); bytes += b;
 });
 console.log('total MB', (bytes / 1048576).toFixed(0));
-for (const [k, e] of [...by].sort((a, b) => b[1].b - a[1].b).slice(0, 60)) console.log(k.padEnd(34), String(e.n).padStart(5), 'vis', String(e.vis).padStart(4), (e.t / 1e3).toFixed(0).padStart(7) + 'k tris', (e.b / 1048576).toFixed(1).padStart(8) + ' MB');
+for (const [k, e] of [...by].sort((a, b) => b[1].b - a[1].b)) console.log(k.padEnd(34), String(e.n).padStart(5), 'vis', String(e.vis).padStart(4), (e.t / 1e3).toFixed(0).padStart(7) + 'k tris', (e.b / 1048576).toFixed(1).padStart(8) + ' MB');

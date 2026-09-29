@@ -1,0 +1,18 @@
+import { SRC_ROOT } from './stubs.mjs';
+import { createMockGL } from './mockgl.mjs';
+import path from 'node:path'; import { pathToFileURL } from 'node:url';
+const imp = (p) => import(pathToFileURL(path.join(SRC_ROOT, p)).href);
+const THREE = await imp('node_modules/three/build/three.module.js');
+const canvas = { width: 1600, height: 900, style: {}, addEventListener() {}, removeEventListener() {}, getContext() {} };
+const gl = createMockGL(canvas);
+const r = new THREE.WebGLRenderer({ canvas, context: gl, antialias: false, reversedDepthBuffer: true });
+r.shadowMap.enabled = true; r.shadowMap.type = THREE.PCFSoftShadowMap;
+const scene = new THREE.Scene(), cam = new THREE.PerspectiveCamera(55, 1.7, 0.1, 150000);
+const sun = new THREE.DirectionalLight(0xffffff, 3); sun.castShadow = true; scene.add(sun); scene.add(new THREE.HemisphereLight(0xaaccff, 0x443322, 1));
+const m = new THREE.MeshStandardMaterial({ color: 0x888888 });
+m.onBeforeCompile = (sh) => { sh.uniforms.uFoo = { value: 1.5 }; sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nuniform float uFoo;'); };
+const mesh = new THREE.Mesh(new THREE.BoxGeometry(), m); mesh.castShadow = mesh.receiveShadow = true; scene.add(mesh);
+r.compile(scene, cam);
+console.log('programs captured', gl._captured.length);
+for (const c of gl._captured) console.log('--- vs', c.vs?.length, 'fs', c.fs?.length, (c.fs || '').includes('uFoo') ? 'HAS uFoo' : '');
+console.log((gl._captured[0]?.fs || '').slice(0, 1200));
