@@ -1,0 +1,4 @@
+build/
+assets/
+*.bmp
+build-release/
