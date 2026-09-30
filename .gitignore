@@ -2,3 +2,4 @@ build/
 assets/
 *.bmp
 build-release/
+node_modules/

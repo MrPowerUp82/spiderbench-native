@@ -1,6 +1,6 @@
 # Spiderbench Native — C++ / SDL2 / OpenGL
 
-Port nativo do [Spiderbench](../spiderbench) (Three.js/WebGL2) para **C++20 + SDL2 + OpenGL 3.3 core**
+Port nativo do [Spiderbench](../spiderbench-remake) (Three.js/WebGL2) para **C++20 + SDL2 + OpenGL 3.3 core**
 (usa um contexto 4.5+ quando disponível, para depth reversed-Z).
 
 Este é o **primeiro corte vertical** da migração: a travessia do jogo (swing, parede, zip, poleiro, estilingue,
@@ -9,7 +9,7 @@ simplificada. Os demais módulos vêm nas próximas fases (veja a tabela abaixo)
 
 ## Build (Windows, MSYS2 UCRT64)
 
-Pré-requisitos (já presentes nesta máquina): `mingw-w64-ucrt-x86_64-{gcc,cmake,ninja,SDL2,zlib,jsoncpp}`,
+Pré-requisitos: `mingw-w64-ucrt-x86_64-{gcc,cmake,ninja,SDL2,zlib,jsoncpp}`,
 Python 3 com Pillow (WebP) e `ffmpeg` no PATH.
 
 ```bash
@@ -18,6 +18,36 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 build/spiderbench.exe
 ```
+
+### Build com Visual Studio Build Tools e vcpkg
+
+No PowerShell, com Visual Studio 2022 Build Tools instalado:
+
+```powershell
+git clone https://github.com/microsoft/vcpkg.git build/vcpkg
+.\build\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+.\build\vcpkg\vcpkg.exe install sdl2 zlib jsoncpp opengl-registry --triplet x64-windows
+python tools/convert_assets.py --src ..\spiderbench-remake --out assets
+$cmake = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
+$toolchain = (Resolve-Path .\build\vcpkg\scripts\buildsystems\vcpkg.cmake).Path
+& $cmake -S . -B build/msvc -G 'Visual Studio 17 2022' -A x64 "-DCMAKE_TOOLCHAIN_FILE=$toolchain"
+& $cmake --build build/msvc --config Release --parallel 8
+.\build\msvc\Release\spiderbench.exe
+```
+
+O executável e as DLLs necessárias ficam em `build/msvc/Release/`.
+
+Para gerar a referência fiel da cidade a partir do JS original instalado em
+`../spiderbench-remake`:
+
+```bash
+cd ../spiderbench-remake && npm ci && cd ../spiderbench-native
+npm ci                                  # canvas 2D para o bake headless
+cmake --build build --target bake_city
+```
+
+O alvo `bake_city` executa os bakes em sequência e valida seus resultados.
+Os arquivos gerados ficam em `build/city-bake/` e `build/refshaders/`.
 
 As DLLs de runtime (SDL2, zlib, jsoncpp, libstdc++) são copiadas para `build/` automaticamente. O executável
 procura `assets/` ao lado de si e, se não encontrar, na pasta do código-fonte. `RelWithDebInfo` mantém o console
@@ -79,3 +109,43 @@ Variáveis de debug: `SB_GLDEBUG=1` (erros GL), `SB_DEBUGVIEW=1|2` (termo de som
 5. Pipeline avançado: SSGI, SSR, AO, TAA, reflexos de vidro, dia/noite e chuva.
 
 Projeto de fã, não comercial — mesma licença e aviso do projeto original.
+
+## Referência JS para o bake
+
+O harness em [tools/ref/README.md](tools/ref/README.md) executa `buildCity` no Node e
+captura o GLSL final dos materiais com os patches globais de iluminação e CSM.
+Também exporta a colisão, os prédios e os zip points finais para um arquivo
+binário lido por `src/world/baked_collision.cpp`, com 512 consultas de referência
+do JS. As 1.510 malhas da cena também são exportadas para um arquivo de 355 MiB,
+com 7.531 buffers verificados por checksum e um leitor C++ de acesso sob demanda.
+As listas completas dos 85 pools de LOD também foram exportadas e vinculadas
+às malhas, cobrindo 550.880 entradas de instâncias.
+O bake captura 62 texturas com pixels (incluindo o DFG LUT do Three.js) e 348 vínculos de textura a programas;
+dois render targets dependem da execução e não têm pixels iniciais.
+O executável ainda usa a cidade procedural simplificada: a ligação das malhas,
+dos materiais e dos shaders originais está disponível no modo de inspeção:
+
+```powershell
+.\build\msvc\Release\spiderbench.exe --validate-baked-shaders
+.\build\msvc\Release\spiderbench.exe --validate-baked-pools
+.\build\msvc\Release\spiderbench.exe --validate-baked-csm
+.\build\msvc\Release\spiderbench.exe --validate-baked-tiles
+.\build\msvc\Release\spiderbench.exe --validate-baked-environment
+.\build\msvc\Release\spiderbench.exe --view-bake
+.\build\msvc\Release\spiderbench.exe --view-bake --test 1 --out build/baked-preview
+```
+
+Os 202 programas dos passes principal, reflexo e profundidade passaram pela
+compilação/link na GPU Intel UHD. O modo de inspeção desenha as malhas com texturas,
+uniforms, composição dos materiais, pools por distância e três cascatas de sombra,
+usando câmera livre (WASD, Q/E, mouse e Shift). A seleção dos pools coincide com
+127.765 instâncias ordenadas do JS; também coincidem 24 encaixes de cascata e
+7.785 estados de visibilidade/sombra dos tiles, incluindo a histerese de LOD.
+O ambiente também é gerado na GPU nativa com os programas originais: ruído 3D,
+LUT atmosférica, cubemap e PMREM GGX de 768 × 1024. O céu usa o passe original
+em meia resolução. A composição atmosférica, seis níveis de bloom, exposição
+automática, TAA e correção de cor executam 15 passes capturados de `pipeline.js`.
+O TAA preserva o jitter Halton de 16 frames, reprojeção e histórico alternado.
+Ainda faltam AO, SSGI, reflexos, shafts/flare, efeitos de câmera e a ligação
+das colisões antes de usar essa cidade no modo de jogo. A fidelidade de imagem
+ainda precisa de comparação com capturas do navegador na mesma câmera.

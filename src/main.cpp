@@ -11,6 +11,8 @@
 #include <SDL.h>
 #include "gfx/gl.h"
 #include "gfx/renderer.h"
+#include "gfx/baked_programs.h"
+#include "gfx/baked_city.h"
 #include "gfx/texture.h"
 #include "world/world.h"
 #include "player/player.h"
@@ -21,6 +23,7 @@
 #include <string>
 #include <vector>
 #include <utility>
+#include <filesystem>
 
 namespace {
 struct App {
@@ -156,14 +159,70 @@ void testScript(App& a, float t) {
   if (at(8.9f, 9.0f) || at(12.0f, 12.1f)) I.press(SDL_SCANCODE_E); else I.release(SDL_SCANCODE_E);
   if (at(10.0f, 10.8f)) I.press(SDL_SCANCODE_A); else I.release(SDL_SCANCODE_A);
 }
+
+int viewBake(App& a, const std::string& directory, const std::string& shaders) {
+  BakedCity city;
+  if (!city.open(directory, shaders)) { std::fprintf(stderr, "[baked-city] could not open bake\n"); return 1; }
+  a.camera.position = {250, 32, 175}; a.camera.lookAt({250, 8, -250}); a.camera.aspect = float(a.w) / a.h;
+  if (a.testScene == 2) { a.camera.position = {0, 70, -600}; a.camera.lookAt({0, 30, -1400}); }
+  if (a.testScene == 3) { a.camera.position = {120, 100, 2760}; a.camera.lookAt({80, 50, 2200}); }
+  uint64_t last = SDL_GetPerformanceCounter(); int frames = 0;
+  if (a.test) std::filesystem::create_directories(a.outDir);
+  while (a.running) {
+    SDL_Event event;
+    while (SDL_PollEvent(&event)) {
+      if (event.type == SDL_QUIT || (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE)) a.running = false;
+      if (event.type == SDL_MOUSEBUTTONDOWN) SDL_SetRelativeMouseMode(SDL_TRUE);
+      if (event.type == SDL_MOUSEMOTION && SDL_GetRelativeMouseMode() && !a.test) {
+        a.camera.quaternion = Quat::axisAngle(UP, -event.motion.xrel * .002f) * a.camera.quaternion;
+        a.camera.rotateX(-event.motion.yrel * .002f);
+      }
+      if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+        SDL_GL_GetDrawableSize(a.win, &a.w, &a.h); a.renderer.resize(a.w, a.h); a.camera.aspect = float(a.w) / a.h;
+      }
+    }
+    uint64_t now = SDL_GetPerformanceCounter(); float dt = std::min(.1f, float(double(now - last) / SDL_GetPerformanceFrequency())); last = now;
+    if (!a.test) {
+      const auto* keys = SDL_GetKeyboardState(nullptr); Vec3 move;
+      if (keys[SDL_SCANCODE_W]) move += a.camera.direction(); if (keys[SDL_SCANCODE_S]) move -= a.camera.direction();
+      Vec3 right = a.camera.quaternion * Vec3{1, 0, 0};
+      if (keys[SDL_SCANCODE_D]) move += right; if (keys[SDL_SCANCODE_A]) move -= right;
+      if (keys[SDL_SCANCODE_E]) move.y++; if (keys[SDL_SCANCODE_Q]) move.y--;
+      a.camera.position += move * (dt * (keys[SDL_SCANCODE_LSHIFT] ? 150.f : 30.f)); a.time += dt;
+    }
+    FrameInput frame; frame.cam = &a.camera; frame.world = &a.world; frame.bakedCity = &city; frame.characterVisible = false; frame.time = a.time; frame.dt = a.test ? 1.f / 60 : dt;
+    a.renderer.render(frame);
+    if (!city.healthy) { city.clear(); return 1; }
+    if (frames == 0) std::printf("[baked-city] %zu draws, %zu shadow draws, %llu triangles, %.1f MiB vertex/index buffers\n", city.drawn, city.shadowDrawn, (unsigned long long)city.triangles, city.residentBytes / 1048576.0);
+    if (a.test && frames == 1) { if (!saveScreenshot(a, a.outDir + "/baked_city.bmp")) { city.clear(); return 1; } a.running = false; }
+    SDL_GL_SwapWindow(a.win); frames++;
+  }
+  city.clear(); return 0;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
   App a;
+  bool validateBake = false;
+  bool validatePools = false;
+  bool validateCSM = false;
+  bool validateTiles = false;
+  bool validateEnvironment = false;
+  bool previewBake = false;
+  std::string shaderDirectory = SB_SOURCE_SHADERS;
+  std::string bakeDirectory = SB_SOURCE_BAKE;
   for (int i = 1; i < argc; i++) {
     if (!std::strcmp(argv[i], "--test")) { a.test = true; if (i + 1 < argc && argv[i + 1][0] != '-') a.testLen = (float)std::atof(argv[++i]); }
     else if (!std::strcmp(argv[i], "--out") && i + 1 < argc) a.outDir = argv[++i];
     else if (!std::strcmp(argv[i], "--scene") && i + 1 < argc) a.testScene = std::atoi(argv[++i]);
+    else if (!std::strcmp(argv[i], "--validate-baked-shaders")) validateBake = true;
+    else if (!std::strcmp(argv[i], "--validate-baked-pools")) validatePools = true;
+    else if (!std::strcmp(argv[i], "--validate-baked-csm")) validateCSM = true;
+    else if (!std::strcmp(argv[i], "--validate-baked-tiles")) validateTiles = true;
+    else if (!std::strcmp(argv[i], "--validate-baked-environment")) validateEnvironment = true;
+    else if (!std::strcmp(argv[i], "--shader-dir") && i + 1 < argc) shaderDirectory = argv[++i];
+    else if (!std::strcmp(argv[i], "--view-bake")) previewBake = true;
+    else if (!std::strcmp(argv[i], "--bake-dir") && i + 1 < argc) bakeDirectory = argv[++i];
   }
   if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) { std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 1; }
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
@@ -185,9 +244,23 @@ int main(int argc, char** argv) {
   SDL_GL_GetDrawableSize(a.win, &a.w, &a.h);
   std::printf("[gl] %s | %s\n", (const char*)glGetString(GL_VERSION), (const char*)glGetString(GL_RENDERER));
 
+  if (validateBake || validatePools || validateCSM || validateTiles || validateEnvironment) {
+    BakedPrograms programs;
+    BakedEnvironment environment;
+    bool ok = validateEnvironment ? environment.open((std::filesystem::path(bakeDirectory) / "environment").string()) && environment.validate((std::filesystem::path(bakeDirectory) / "environment/native-check.json").string()) : validateTiles ? validateBakedVisibility(bakeDirectory, shaderDirectory) : validateCSM ? validateBakedCSM(bakeDirectory) : validatePools ? validateBakedPools(bakeDirectory) : programs.open(shaderDirectory) && programs.validateAll();
+    environment.clear();
+    programs.clear();
+    SDL_GL_DeleteContext(a.gl); SDL_DestroyWindow(a.win); SDL_Quit();
+    return ok ? 0 : 1;
+  }
+
   if (!a.hud.init()) return 1;
   loadingFrame(a, "Carregando shaders", 0.05f);
   if (!a.renderer.init(a.w, a.h)) return 1;
+  if (previewBake) {
+    int result = viewBake(a, bakeDirectory, shaderDirectory);
+    SDL_GL_DeleteContext(a.gl); SDL_DestroyWindow(a.win); SDL_Quit(); return result;
+  }
   loadingFrame(a, "Gerando a cidade", 0.2f);
   uint32_t t0 = SDL_GetTicks();
   a.world.build(1234);

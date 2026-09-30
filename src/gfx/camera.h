@@ -6,6 +6,7 @@ struct Camera {
   Vec3 position{0, 5, 10};
   Quat quaternion;
   float fov = 55, aspect = 16.f / 9, zNear = 0.1f, zFar = 20000;
+  Vec2 projectionJitter; // NDC offset, zero outside the baked TAA path
   void lookAt(const Vec3& target, const Vec3& up = UP) {
     Vec3 z = (position - target).normalized(); // camera +Z points away from the target
     if (z.lengthSq() < 1e-8f) return;
@@ -19,7 +20,10 @@ struct Camera {
   Vec3 direction() const { return quaternion * Vec3{0, 0, -1}; }
   Mat4 world() const { return Mat4::compose(position, quaternion, {1, 1, 1}); }
   Mat4 view() const { return world().inverse(); }
-  Mat4 proj(bool revZ) const { return revZ ? Mat4::perspectiveRevZ(fov, aspect, zNear, zFar) : Mat4::perspective(fov, aspect, zNear, zFar); }
+  Mat4 proj(bool revZ) const {
+    Mat4 p = revZ ? Mat4::perspectiveRevZ(fov, aspect, zNear, zFar) : Mat4::perspective(fov, aspect, zNear, zFar);
+    p.m[8] += projectionJitter.x; p.m[9] += projectionJitter.y; return p;
+  }
   // NDC projection (x, y in -1..1, z > 1 behind / beyond)
   Vec3 project(const Vec3& p) const {
     Mat4 vp = Mat4::perspective(fov, aspect, zNear, zFar) * view();

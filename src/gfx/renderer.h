@@ -7,7 +7,7 @@
 #include "player/web.h"
 #include <vector>
 
-class World; class Rig;
+class World; class Rig; class BakedCity;
 
 struct CharGpu {
   struct Part { GLuint vao = 0, vbo = 0, ibo = 0; GLsizei count = 0; int material = -1; };
@@ -20,11 +20,12 @@ struct CharGpu {
 struct FrameInput {
   const Camera* cam = nullptr;
   const World* world = nullptr;
+  BakedCity* bakedCity = nullptr;
   const Rig* rig = nullptr;
   const CharGpu* character = nullptr;
   bool characterVisible = true;
   const std::vector<WebLine>* webs = nullptr;
-  float time = 0, motionBlur = 0;
+  float time = 0, motionBlur = 0, dt = 1.f / 60;
 };
 
 class Renderer {

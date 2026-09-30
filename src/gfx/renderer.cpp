@@ -1,10 +1,10 @@
 #include "gfx/renderer.h"
+#include "gfx/baked_city.h"
 #include "gfx/shaders.h"
 #include "gfx/texture.h"
 #include "world/world.h"
 #include "anim/rig.h"
 #include <cstdio>
-#include <cstdlib>
 #include <cstdlib>
 #include <string>
 
@@ -230,29 +230,35 @@ static void glCheck(const char* where) {
 }
 
 void Renderer::render(const FrameInput& f) {
-  const Camera& cam = *f.cam;
+  Camera cam = *f.cam;
   glCheck("frame start");
   computeCascades(cam);
   // ---- shadow pass
-  clipDepth01(false);
-  glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo_);
-  glViewport(0, 0, SHADOW, SHADOW);
-  glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS); glDepthMask(GL_TRUE);
-  glEnable(GL_CULL_FACE); glCullFace(GL_BACK);
-  glEnable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(1.5f, 2.0f);
-  for (int c = 0; c < 3; c++) {
-    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, shadowTex_, 0, c);
-    { GLenum none = GL_NONE; glDrawBuffers(1, &none); glReadBuffer(GL_NONE); }
-    if (std::getenv("SB_GLDEBUG") && glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) std::fprintf(stderr, "[gl] shadow fbo incomplete 0x%x\n", glCheckFramebufferStatus(GL_FRAMEBUFFER));
-    glClearDepth(1.0); glClear(GL_DEPTH_BUFFER_BIT);
-    worldDepth_.use(); worldDepth_.set("uViewProj", shadowMat_[c]);
-    f.world->cityGpu.drawCulled(Frustum(shadowMat_[c]));
-    if (f.characterVisible || true) { glDisable(GL_CULL_FACE); skinDepth_.use(); skinDepth_.set("uViewProj", shadowMat_[c]); drawCharacter(f, skinDepth_, true); glEnable(GL_CULL_FACE); }
+  if (f.bakedCity) {
+    f.bakedCity->healthy = f.bakedCity->drawShadows(cam, f.time);
+    if (!f.bakedCity->healthy) return;
+  } else {
+    clipDepth01(false);
+    glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo_);
+    glViewport(0, 0, SHADOW, SHADOW);
+    glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS); glDepthMask(GL_TRUE);
+    glEnable(GL_CULL_FACE); glCullFace(GL_BACK);
+    glEnable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(1.5f, 2.0f);
+    for (int c = 0; c < 3; c++) {
+      glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, shadowTex_, 0, c);
+      { GLenum none = GL_NONE; glDrawBuffers(1, &none); glReadBuffer(GL_NONE); }
+      if (std::getenv("SB_GLDEBUG") && glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) std::fprintf(stderr, "[gl] shadow fbo incomplete 0x%x\n", glCheckFramebufferStatus(GL_FRAMEBUFFER));
+      glClearDepth(1.0); glClear(GL_DEPTH_BUFFER_BIT);
+      worldDepth_.use(); worldDepth_.set("uViewProj", shadowMat_[c]);
+      f.world->cityGpu.drawCulled(Frustum(shadowMat_[c]));
+      glDisable(GL_CULL_FACE); skinDepth_.use(); skinDepth_.set("uViewProj", shadowMat_[c]); drawCharacter(f, skinDepth_, true); glEnable(GL_CULL_FACE);
+    }
+    glDisable(GL_POLYGON_OFFSET_FILL);
   }
-  glDisable(GL_POLYGON_OFFSET_FILL);
   glCheck("shadows");
 
   // ---- HDR forward pass
+  if (f.bakedCity) cam.projectionJitter = f.bakedCity->jitter(w_, h_);
   clipDepth01(true);
   glBindFramebuffer(GL_FRAMEBUFFER, hdrFbo_);
   glViewport(0, 0, w_, h_);
@@ -261,9 +267,14 @@ void Renderer::render(const FrameInput& f) {
   glClear(GL_DEPTH_BUFFER_BIT);
   // sky (fills the background, no depth)
   glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
-  sky_.use(); setCommon(sky_, cam, f.time);
-  sky_.set("uInvViewProj", (Mat4::perspective(cam.fov, cam.aspect, cam.zNear, cam.zFar) * view).inverse());
-  glBindVertexArray(emptyVao_); glDrawArrays(GL_TRIANGLES, 0, 3);
+  if (f.bakedCity) {
+    f.bakedCity->healthy = f.bakedCity->drawSky(cam, w_, h_);
+    if (!f.bakedCity->healthy) return;
+  } else {
+    sky_.use(); setCommon(sky_, cam, f.time);
+    sky_.set("uInvViewProj", (Mat4::perspective(cam.fov, cam.aspect, cam.zNear, cam.zFar) * view).inverse());
+    glBindVertexArray(emptyVao_); glDrawArrays(GL_TRIANGLES, 0, 3);
+  }
   glCheck("sky");
   glEnable(GL_DEPTH_TEST);
   glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D_ARRAY, shadowTex_);
@@ -275,9 +286,10 @@ void Renderer::render(const FrameInput& f) {
   const char* names[] = {"tAsphalt", "tSidewalk", "tGrass", "tNoise", "tBark"};
   for (int i = 0; i < 5; i++) { glActiveTexture(GL_TEXTURE1 + i); glBindTexture(GL_TEXTURE_2D, texs[i]); world_.set(names[i], 1 + i); }
   { Frustum fr(Mat4::perspective(cam.fov, cam.aspect, cam.zNear, cam.zFar) * view);
-    f.world->cityGpu.drawCulled(fr); f.world->farGpu.drawCulled(fr); }
+    if (f.bakedCity) f.bakedCity->healthy = f.bakedCity->healthy && f.bakedCity->draw(cam, revZ, f.time);
+    else { f.world->cityGpu.drawCulled(fr); f.world->farGpu.drawCulled(fr); } }
   // water
-  {
+  if (!f.bakedCity) {
     float cx = cam.position.x, cz = cam.position.z, R = 20000, y = -1.6f;
     float v[18] = {cx - R, y, cz - R, cx + R, y, cz + R, cx + R, y, cz - R, cx - R, y, cz - R, cx - R, y, cz + R, cx + R, y, cz + R};
     glBindBuffer(GL_ARRAY_BUFFER, waterVbo_); glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(v), v);
@@ -295,6 +307,20 @@ void Renderer::render(const FrameInput& f) {
   }
   drawWebs(f, vp);
   glCheck("forward");
+  if (f.bakedCity && std::getenv("SB_BAKE_TRACE")) {
+    std::vector<float> pixels(size_t(w_) * h_ * 4);
+    glReadPixels(0, 0, w_, h_, GL_RGBA, GL_FLOAT, pixels.data());
+    size_t bad = 0; float high = 0;
+    for (size_t i = 0; i < pixels.size(); i += 4) {
+      for (int c = 0; c < 3; c++) {
+        high = std::max(high, pixels[i + c]);
+        if (!std::isfinite(pixels[i + c]) || pixels[i + c] > 10000) {
+          if (bad++ == 0) std::printf("[baked-hdr] first invalid pixel %zu %zu: %g %g %g\n", (i / 4) % w_, (i / 4) / w_, pixels[i], pixels[i + 1], pixels[i + 2]);
+        }
+      }
+    }
+    std::printf("[baked-hdr] %zu invalid channels, peak %g\n", bad, high);
+  }
   if (std::getenv("SB_GLDEBUG")) {
     float px[4] = {0}; glReadPixels(w_ / 2, h_ / 2, 1, 1, GL_RGBA, GL_FLOAT, px);
     float top[4] = {0}; glReadPixels(w_ / 2, h_ - 5, 1, 1, GL_RGBA, GL_FLOAT, top);
@@ -305,6 +331,11 @@ void Renderer::render(const FrameInput& f) {
 
   // ---- post: bloom chain
   clipDepth01(false);
+  if (f.bakedCity) {
+    f.bakedCity->healthy = f.bakedCity->healthy && f.bakedCity->drawPost(cam, w_, h_, hdrColor_, hdrDepth_, f.dt);
+    glCheck("original post");
+    return;
+  }
   glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
   glBindVertexArray(emptyVao_);
   bright_.use(); bright_.set("tSrc", 0);

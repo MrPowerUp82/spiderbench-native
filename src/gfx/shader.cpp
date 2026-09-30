@@ -25,7 +25,7 @@ static std::string withDefines(const std::string& src, const std::string& define
 bool Shader::build(const char* name, const std::string& vs, const std::string& fs, const std::string& defines) {
   name_ = name;
   GLuint v = compile(GL_VERTEX_SHADER, withDefines(vs, defines), name), f = compile(GL_FRAGMENT_SHADER, withDefines(fs, defines), name);
-  if (!v || !f) return false;
+  if (!v || !f) { if (v) glDeleteShader(v); if (f) glDeleteShader(f); return false; }
   id = glCreateProgram();
   glAttachShader(id, v); glAttachShader(id, f);
   glLinkProgram(id);
@@ -35,6 +35,7 @@ bool Shader::build(const char* name, const std::string& vs, const std::string& f
     GLint n = 0; glGetProgramiv(id, GL_INFO_LOG_LENGTH, &n);
     std::vector<char> log(n + 1); glGetProgramInfoLog(id, n, nullptr, log.data());
     std::fprintf(stderr, "[shader] %s link error:\n%s\n", name, log.data());
+    glDeleteProgram(id); id = 0;
     return false;
   }
   return true;

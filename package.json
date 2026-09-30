@@ -1,0 +1,8 @@
+{
+  "name": "spiderbench-native-tools",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@napi-rs/canvas": "1.0.9"
+  }
+}
