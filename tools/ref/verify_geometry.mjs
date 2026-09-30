@@ -1,11 +1,12 @@
 // Validate every compressed geometry buffer and its references without rebuilding the city.
+import { BAKE, SHADERS } from './paths.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 
 const stem = process.argv.includes('--sample') ? 'geometry-sample' : 'geometry';
-const dir = path.resolve('build/city-bake');
+const dir = BAKE;
 const m = JSON.parse(fs.readFileSync(path.join(dir, stem + '.json')));
 if (m.format !== 'SBGEO01' || m.version !== 1) throw new Error('Unsupported archive');
 const fd = fs.openSync(path.join(dir, m.archive), 'r');

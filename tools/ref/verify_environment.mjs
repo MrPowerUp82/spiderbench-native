@@ -1,8 +1,9 @@
+import { BAKE, SHADERS } from './paths.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
-const dir=path.resolve('build/city-bake/environment');
+const dir=path.join(BAKE, 'environment');
 const m=JSON.parse(fs.readFileSync(path.join(dir,'manifest.json')));
 const g=JSON.parse(fs.readFileSync(path.join(dir,'geometry.json')));
 const bytes=fs.readFileSync(path.join(dir,'geometry.sbgeo'));
@@ -33,7 +34,8 @@ const output=m.resources[m.environment];
 if(noiseLayers.size!==128||cubeFaces.size!==6||output.width!==768||output.height!==1024||!initialized.has(m.environment)) throw new Error('Incomplete environment graph');
 for(const input of Object.values(m.postInputs)) initialized.add(input);
 const down=m.postJobs.filter(j=>j.name==='bloomDown'), up=m.postJobs.filter(j=>j.name==='bloomUp');
-if(down.length!==6||up.length!==5||m.postJobs.at(-1)?.name!=='final') throw new Error('Incomplete original post chain');
+// quality.bloomLevels: 6 on med/high, 5 on low; the upsample chain has one pass fewer
+if(down.length<1||up.length!==down.length-1||m.postJobs.at(-1)?.name!=='final') throw new Error('Incomplete original post chain');
 for(const j of m.postJobs) {
   if(!programIds.has(j.program)||!m.geometries[j.geometry]) throw new Error('Invalid post program/geometry');
   for(const [name,input] of Object.entries(j.textures)) {
@@ -46,4 +48,4 @@ for(const j of m.postJobs) {
   if(j.target) initialized.add(j.target.texture);
 }
 console.log(`verified ${g.blobs.length} buffer checksums, ${programIds.size} programs, ${draws} draws, 128 noise layers, six cube faces and GGX PMREM dependencies`);
-console.log(`verified ${m.postJobs.length} original post passes: atmosphere, TAA, six bloom levels, adaptation and grading`);
+console.log(`verified ${m.postJobs.length} original post passes: atmosphere, TAA, ${down.length} bloom levels, adaptation and grading`);

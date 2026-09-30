@@ -1,4 +1,5 @@
 // Reference the actual CSM.update and Three.js shadow-matrix implementation.
+import { BAKE, SHADERS } from './paths.mjs';
 import { SRC_ROOT } from './stubs.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -7,7 +8,7 @@ const imp = p => import(pathToFileURL(path.join(SRC_ROOT, p)).href);
 const THREE = await imp('node_modules/three/build/three.module.js');
 const { CSM } = await imp('src/render/csm.js');
 const { getQuality } = await imp('src/render/quality.js');
-const manifestPath = path.resolve('build/refshaders/manifest.json');
+const manifestPath = path.join(SHADERS, 'manifest.json');
 const manifest = JSON.parse(fs.readFileSync(manifestPath));
 const quality = getQuality();
 if (manifest.quality !== quality.name || manifest.cascadeCount !== quality.cascades) throw new Error('CSM quality mismatch');
@@ -40,5 +41,5 @@ for (const [position, target, fov, aspect] of cases) {
   });
   frames.push({ camera: { position, quaternion: camera.quaternion.toArray(), fov, aspect, zNear:camera.near,zFar:camera.far }, cascades });
 }
-fs.writeFileSync('build/city-bake/csm-queries.json', JSON.stringify({ format:'SBCSMCHECK1',config,sunDirection:manifest.sunDirection,frames }));
+fs.writeFileSync(path.join(BAKE, 'csm-queries.json'), JSON.stringify({ format:'SBCSMCHECK1',config,sunDirection:manifest.sunDirection,frames }));
 console.log(`exported ${frames.length * csm.N} original JS cascade fits, including staggered updates, FOV and aspect changes`);

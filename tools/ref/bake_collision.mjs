@@ -1,6 +1,7 @@
 // Bake the *final* JS collision grid, height fields, building boxes and validated
 // zip points without rounding or reimplementing world generation.
 // Run: node --max-old-space-size=8192 tools/ref/bake_collision.mjs
+import { BAKE, SHADERS } from './paths.mjs';
 import { renderer, SRC_ROOT } from './stubs.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -14,7 +15,7 @@ const city = await buildCity({ scene: new THREE.Scene(), renderer });
 const grid = city.collision;
 const zip = city.getZipPoints(new THREE.Vector3(), 30000);
 const boxes = city.buildings;
-const outDir = path.resolve('build/city-bake');
+const outDir = BAKE;
 fs.mkdirSync(outDir, { recursive: true });
 const finalPath = path.join(outDir, 'collision.sbcol');
 const tmpPath = finalPath + '.tmp';
@@ -53,8 +54,10 @@ try {
   raw(zipP); raw(zipK);
   const boxP = new Float32Array(boxes.length * 6);
   boxes.forEach((b, i) => {
-    if (!b.min || !b.max) throw new Error(`Invalid building box ${i}`);
-    boxP.set([b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z], i * 6);
+    // gen.boxes stores {min: [x, y, z], max: [x, y, z]} (player/traversal/collide.js BoxIndex)
+    const v = [...b.min, ...b.max];
+    if (v.length !== 6 || !v.every(Number.isFinite)) throw new Error(`Invalid building box ${i}`);
+    boxP.set(v, i * 6);
   });
   raw(boxP);
   fs.closeSync(fd);

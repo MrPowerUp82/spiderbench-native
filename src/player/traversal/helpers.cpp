@@ -1,8 +1,72 @@
 #include "player/traversal/helpers.h"
+#include "world/baked_collision.h"
 #include <algorithm>
+
+// ================================================================= collide.js (exact collider over the baked solids)
+namespace {
+struct Shape { uint8_t type; float x0, y0, z0, x1, y1, z1, cx, cz, rad; };
+Shape shapeOf(const BakedCollision& g, uint32_t i) {
+  const float* b = g.bb.data() + size_t(i) * 6; const float* p = g.par.data() + size_t(i) * 6;
+  Shape s{g.type[i], b[0], b[1], b[2], b[3], b[4], b[5], 0, 0, 0};
+  if (s.type == 1) { s.cx = p[0]; s.cz = p[1]; s.rad = std::max(p[2], p[3]); }
+  return s;
+}
+
+std::optional<Contact> pushOutExact(const BakedCollision& g, Vec3& feet, float r, float h, float stepH) {
+  std::optional<Contact> best;
+  const float lo = feet.y + stepH, hi = feet.y + h;
+  for (int iter = 0; iter < 3; iter++) {
+    bool moved = false;
+    g.query(feet.x - (r + 0.05f), feet.z - (r + 0.05f), feet.x + r + 0.05f, feet.z + r + 0.05f, [&](uint32_t i) {
+      const Shape b = shapeOf(g, i);
+      if (b.y0 >= hi || b.y1 <= lo) return;
+      float nx, nz, depth, cx, cz;
+      if (b.type == 1) { // vertical cylinder / cone: radial
+        const float dx = feet.x - b.cx, dz = feet.z - b.cz, d = std::hypot(dx, dz);
+        if (d >= r + b.rad) return;
+        if (d > 1e-6f) { nx = dx / d; nz = dz / d; } else { nx = 1; nz = 0; }
+        depth = r + b.rad - d; cx = b.cx + nx * b.rad; cz = b.cz + nz * b.rad;
+      } else {
+        cx = std::min(std::max(feet.x, b.x0), b.x1); cz = std::min(std::max(feet.z, b.z0), b.z1);
+        const float dx = feet.x - cx, dz = feet.z - cz, d2 = dx * dx + dz * dz;
+        if (d2 >= r * r) return;
+        if (d2 > 1e-10f) { const float d = std::sqrt(d2); nx = dx / d; nz = dz / d; depth = r - d; }
+        else { // centre inside the footprint: push out along the shallowest face
+          const float e[4] = {feet.x - b.x0, b.x1 - feet.x, feet.z - b.z0, b.z1 - feet.z};
+          int k = 0; for (int j = 1; j < 4; j++) if (e[j] < e[k]) k = j;
+          nx = k == 0 ? -1.f : k == 1 ? 1.f : 0.f; nz = k == 2 ? -1.f : k == 3 ? 1.f : 0.f; depth = e[k] + r;
+        }
+      }
+      const float top = b.type == 2 ? g.top(i, cx, cz) : b.y1;
+      if (top <= lo) return; // ramp surface below the step band
+      feet.x += nx * (depth + 1e-4f); feet.z += nz * (depth + 1e-4f); moved = true;
+      if (!best || depth > best->depth) {
+        Contact c; c.normal = {nx, 0, nz}; c.point = {feet.x - nx * r, feet.y + h * 0.5f, feet.z - nz * r}; c.box = int(i); c.depth = depth; c.top = top;
+        if (std::fabs(nx) > 0.999f) c.normal = {signf(nx), 0, 0}; else if (std::fabs(nz) > 0.999f) c.normal = {0, 0, signf(nz)};
+        best = c;
+      }
+    });
+    if (!moved) break;
+  }
+  if (best) { // report the top of the whole obstacle stack in front (wall + parapet + coping), for vault / wall-run decisions
+    float top = best->top; const float px = best->point.x - best->normal.x * 0.05f, pz = best->point.z - best->normal.z * 0.05f;
+    for (int k = 0; k < 6; k++) {
+      float next = top;
+      g.query(px - 0.02f, pz - 0.02f, px + 0.02f, pz + 0.02f, [&](uint32_t i) {
+        const Shape b = shapeOf(g, i);
+        if (b.y0 <= top + 0.05f && b.y1 > next && px >= b.x0 - 0.02f && px <= b.x1 + 0.02f && pz >= b.z0 - 0.02f && pz <= b.z1 + 0.02f) next = b.type == 2 ? g.top(i, px, pz) : b.y1;
+      });
+      if (next <= top + 1e-3f) break; top = next;
+    }
+    best->top = top;
+  }
+  return best;
+}
+}  // namespace
 
 // ================================================================= collide.js (box path)
 std::optional<Contact> pushOutCapsule(const World& w, Vec3& feet, float r, float h, float stepH) {
+  if (const BakedCollision* g = w.collision()) return pushOutExact(*g, feet, r, h, stepH);
   std::optional<Contact> best;
   float lo = feet.y + stepH, hi = feet.y + h;
   std::vector<int> ids;

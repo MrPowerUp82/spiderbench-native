@@ -1,5 +1,6 @@
 // Preserve the Three.js city scene's vertex/index buffers without re-tessellating.
 // `--limit 12` makes a small archive for format verification; omit for the city.
+import { BAKE, SHADERS } from './paths.mjs';
 import { renderer, SRC_ROOT } from './stubs.mjs';
 import './scene_instrumentation.mjs';
 import fs from 'node:fs';
@@ -18,7 +19,7 @@ const argv = process.argv.slice(2);
 const li = argv.indexOf('--limit');
 const limit = li < 0 ? Infinity : Number(argv[li + 1]);
 if (!(limit > 0)) throw new Error('--limit requires a positive mesh count');
-const dir = path.resolve('build/city-bake');
+const dir = BAKE;
 fs.mkdirSync(dir, { recursive: true });
 const stem = Number.isFinite(limit) ? 'geometry-sample' : 'geometry';
 const packPath = path.join(dir, stem + '.sbgeo');

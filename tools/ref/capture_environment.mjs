@@ -1,5 +1,6 @@
 // Record the original GPU work for noise, atmosphere, environment cube and PMREM.
 // The fake GL captures GLSL only; the native executable executes and validates it.
+import { BAKE, SHADERS } from './paths.mjs';
 import { SRC_ROOT } from './stubs.mjs';
 import { createMockGL } from './mockgl.mjs';
 import fs from 'node:fs';
@@ -11,7 +12,7 @@ const imp = p => import(pathToFileURL(path.join(SRC_ROOT,p)).href);
 const THREE = await imp('node_modules/three/build/three.module.js');
 const { createLighting } = await imp('src/render/lighting.js');
 const { createPipeline } = await imp('src/render/pipeline.js');
-const dir = path.resolve('build/city-bake/environment');
+const dir = path.join(BAKE, 'environment');
 fs.mkdirSync(dir,{recursive:true});
 const canvas = {width:1600,height:900,style:{},addEventListener(){},removeEventListener(){},getContext(){}};
 const gl = createMockGL(canvas);

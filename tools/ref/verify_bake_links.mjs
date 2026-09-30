@@ -1,10 +1,10 @@
 // Check shader-program bindings against the independently baked geometry scene.
+import { BAKE, SHADERS } from './paths.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const base = path.resolve('build');
-const shaders = JSON.parse(fs.readFileSync(path.join(base, 'refshaders/manifest.json')));
-const geometry = JSON.parse(fs.readFileSync(path.join(base, 'city-bake/geometry.json')));
+const shaders = JSON.parse(fs.readFileSync(path.join(SHADERS, 'manifest.json')));
+const geometry = JSON.parse(fs.readFileSync(path.join(BAKE, 'geometry.json')));
 if (shaders.source !== geometry.source || shaders.threeRevision !== geometry.threeRevision)
   throw new Error('Shader and geometry bakes came from different JS sources');
 const programs = new Set(shaders.entries.map(e => e.id));
@@ -17,7 +17,7 @@ for (const use of shaders.usages) {
       (mesh.instanceColor !== null) !== use.instanceColor ||
       material.type !== use.type || Object.keys(mesh.attributes).sort().join(',') !== use.attributes.sort().join(','))
     throw new Error(`Shader/geometry mismatch at object ${use.objectOrdinal}, material ${use.materialId}`);
-  const source = fs.readFileSync(path.join(base,'refshaders',use.id+'.vert.glsl'),'utf8');
+  const source = fs.readFileSync(path.join(SHADERS,use.id+'.vert.glsl'),'utf8');
   if (use.instanceColor && !source.includes('#define USE_INSTANCING_COLOR'))
     throw new Error(`Missing instance color shader variant for ${use.object}`);
   if (!use.uniformValues || typeof use.uniformValues !== 'object')
@@ -38,7 +38,7 @@ for (const link of shaders.objectPrograms ?? []) {
 for (const mesh of geometry.meshes) for (let slot = 0; slot < mesh.material.length; slot++)
   for (const pass of ['main', 'mirror', 'depth'])
     if (!bindings.has(`${mesh.objectOrdinal}:${slot}:${pass}`)) throw new Error(`Missing ${pass} binding at mesh ${mesh.objectOrdinal}`);
-if (shaders.shadowObjects?.length !== geometry.meshes.length || shaders.shadowConfig?.splits?.length !== 4)
+if (shaders.shadowObjects?.length !== geometry.meshes.length || shaders.shadowConfig?.splits?.length !== shaders.cascadeCount + 1)
   throw new Error('Missing cascade/mesh metadata');
 for (const mesh of geometry.meshes) {
   const meta = shaders.shadowObjects[mesh.objectOrdinal];

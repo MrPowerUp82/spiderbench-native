@@ -24,6 +24,7 @@ struct FrameInput {
   const Rig* rig = nullptr;
   const CharGpu* character = nullptr;
   bool characterVisible = true;
+  Vec3 focus; // player object position (character shadow cascade)
   const std::vector<WebLine>* webs = nullptr;
   float time = 0, motionBlur = 0, dt = 1.f / 60;
 };

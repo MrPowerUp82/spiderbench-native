@@ -1,10 +1,11 @@
 // Validate all distance-culled LOD lists and their scene mesh bindings.
+import { BAKE, SHADERS } from './paths.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 
-const dir = path.resolve('build/city-bake');
+const dir = BAKE;
 const packed = fs.readFileSync(path.join(dir, 'pools.json.gz'));
 const raw = zlib.gunzipSync(packed);
 const pools = JSON.parse(raw);

@@ -1,7 +1,10 @@
 #include "world/world.h"
 #include "world/layout.h"
+#include "world/baked_collision.h"
+#include "world/baked_traversal.h"
 #include <cstdio>
 #include <algorithm>
+#include <filesystem>
 
 using namespace layout;
 
@@ -34,6 +37,9 @@ Style pickStyle(float H, float z, Mulberry32& rng) {
   return {2, Vec3{0.88f, 0.84f, 0.74f} * (0.9f + 0.12f * rng()), 3.5f + rng() * 0.4f, 2.0f + rng() * 0.6f};
 }
 }  // namespace
+
+World::World() = default;
+World::~World() = default;
 
 // ------------------------------------------------------------------------------------------------ build
 void World::build(uint32_t seed) {
@@ -343,6 +349,11 @@ void World::nearBoxes(float x, float z, float r, std::vector<int>& out) const {
 // groundHeight(x, z)    highest surface at (x, z)
 // groundHeight(x, z, y) highest surface whose top is <= y + 0.5 (step-up tolerance, collision.js makeQueries)
 float World::groundHeight(float x, float z, float y) const {
+  if (coll_) { // collision.js makeQueries: grounded tops only without y, any top up to y + 0.5 with it
+    const float g = terrainAt(x, z);
+    const BakedTop t = y < INF ? coll_->topAt(x, z, y + 0.5f, false) : coll_->topAt(x, z, INF, true);
+    return std::max(g, t.y);
+  }
   if (y < INF) y += 0.5f;
   float h = terrainHeight(x, z);
   int cx = (int)std::floor((x - GX0) / CELL), cz = (int)std::floor((z - GZ0) / CELL);
@@ -356,6 +367,7 @@ float World::groundHeight(float x, float z, float y) const {
 }
 
 bool World::inside(const Vec3& p, float m) const {
+  if (coll_) return coll_->inside(p.x, p.y, p.z); // collide.js exact collider: no margin
   int cx = (int)std::floor((p.x - GX0) / CELL), cz = (int)std::floor((p.z - GZ0) / CELL);
   if (cx < 0 || cz < 0 || cx >= gw_ || cz >= gh_) return false;
   for (int i : grid_[(size_t)cz * gw_ + cx]) {
@@ -381,6 +393,7 @@ static bool rayBox(const Vec3& o, const Vec3& d, const Box& b, float& tHit, int&
 }
 
 bool World::raycast(const Vec3& o, const Vec3& d, float maxDist, Hit& out) const {
+  if (coll_) return rayBaked(o, d, maxDist, out);
   float best = maxDist; bool found = false;
   // terrain (piecewise flat: road 0 / walk 0.15 / grass / water)
   if (d.y < -1e-5f) {
@@ -451,6 +464,26 @@ void World::boxZipPoints(int i, std::vector<ZipPoint>& pts) const {
 
 void World::getZipPoints(const Vec3& c, float r, std::vector<ZipPoint>& out) const {
   out.clear();
+  if (coll_) { // world/zippoints.js query: every point within r (3D), nearest first
+    const float r2 = r * r;
+    std::vector<std::pair<float, uint32_t>> found;
+    const int x0 = std::max(0, int(std::floor((c.x - r - zipX0_) / ZIP_CELL))), x1 = std::min(zipNx_ - 1, int(std::floor((c.x + r - zipX0_) / ZIP_CELL)));
+    const int z0 = std::max(0, int(std::floor((c.z - r - zipZ0_) / ZIP_CELL))), z1 = std::min(zipNz_ - 1, int(std::floor((c.z + r - zipZ0_) / ZIP_CELL)));
+    for (int gx = x0; gx <= x1; gx++) for (int gz = z0; gz <= z1; gz++) {
+      const size_t cell = size_t(gz) * zipNx_ + gx;
+      for (uint32_t k = zipStart_[cell]; k < zipStart_[cell + 1]; k++) {
+        const uint32_t q = zipItems_[k]; const float d2 = coll_->zips[q].pos.distanceToSquared(c);
+        if (d2 <= r2) found.push_back({d2, q});
+      }
+    }
+    std::stable_sort(found.begin(), found.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    out.reserve(found.size());
+    for (const auto& [d2, q] : found) {
+      const BakedZip& z = coll_->zips[q];
+      out.push_back({z.pos, z.normal, z.kind < zipKinds_.size() ? zipKinds_[z.kind] : "roofEdge", -1});
+    }
+    return;
+  }
   std::vector<int> ids; nearBoxes(c.x, c.z, r, ids);
   for (int i : ids) {
     if (!zipCached_[i]) { boxZipPoints(i, zipCache_[i]); zipCached_[i] = 1; }
@@ -473,4 +506,94 @@ std::string World::districtAt(float x, float z) const {
   if (z < 1400) return "GREENWICH VILLAGE";
   if (z < 2350) return "SOHO";
   return "FINANCIAL DISTRICT";
+}
+
+// ------------------------------------------------------------------------------------------------ baked city
+float World::terrainAt(float x, float z) const { return trav_ ? trav_->terrain(x, z) : terrainHeight(x, z); }
+
+bool World::loadBaked(const std::string& directory) {
+  namespace fs = std::filesystem;
+  auto coll = std::make_unique<BakedCollision>();
+  auto trav = std::make_unique<BakedTraversal>();
+  if (!coll->load((fs::path(directory) / "collision.sbcol").string())) { std::fprintf(stderr, "[world] could not load %s/collision.sbcol\n", directory.c_str()); return false; }
+  if (!trav->load((fs::path(directory) / "traversal.sbtrv").string())) { std::fprintf(stderr, "[world] could not load %s/traversal.sbtrv\n", directory.c_str()); return false; }
+  for (const auto& b : coll->boxes)
+    if (!std::isfinite(b.mn.x + b.mn.y + b.mn.z + b.mx.x + b.mx.y + b.mx.z)) { std::fprintf(stderr, "[world] baked building boxes are not finite: re-run bake_collision\n"); return false; }
+  coll_ = std::move(coll); trav_ = std::move(trav);
+  zipKinds_ = {"roofEdge", "roofCorner", "ledge", "waterTower", "antenna", "pole", "lampTop", "signalMast"}; // zippoints.js ZKIND
+  spawn = coll_->spawn;
+  // traversal.js BoxIndex(world.buildings): coarse building masses for anchor faces
+  boxes.clear(); lampPoints.clear(); trees.clear();
+  for (const auto& b : coll_->boxes) boxes.push_back({b.mn, b.mx, K_BUILDING});
+  for (const auto& t : trav_->trees) trees.push_back({t.pos, t.cy, t.r});
+  index();
+  // zip point buckets over the collision grid extent
+  zipX0_ = coll_->ox; zipZ0_ = coll_->oz;
+  zipNx_ = int(std::ceil(coll_->nx * coll_->cell / ZIP_CELL)); zipNz_ = int(std::ceil(coll_->nz * coll_->cell / ZIP_CELL));
+  std::vector<uint32_t> counts(size_t(zipNx_) * zipNz_, 0), cellOf(coll_->zips.size(), UINT32_MAX);
+  for (size_t q = 0; q < coll_->zips.size(); q++) {
+    const Vec3& p = coll_->zips[q].pos;
+    const int gx = int(std::floor((p.x - zipX0_) / ZIP_CELL)), gz = int(std::floor((p.z - zipZ0_) / ZIP_CELL));
+    if (gx < 0 || gz < 0 || gx >= zipNx_ || gz >= zipNz_) continue;
+    cellOf[q] = uint32_t(gz) * zipNx_ + gx; counts[cellOf[q]]++;
+  }
+  zipStart_.assign(counts.size() + 1, 0);
+  for (size_t i = 0; i < counts.size(); i++) zipStart_[i + 1] = zipStart_[i] + counts[i];
+  zipItems_.assign(zipStart_.back(), 0);
+  std::vector<uint32_t> fill(zipStart_.begin(), zipStart_.end() - 1);
+  for (size_t q = 0; q < cellOf.size(); q++) if (cellOf[q] != UINT32_MAX) zipItems_[fill[cellOf[q]]++] = uint32_t(q);
+  std::printf("[world] baked city: %u solids, %zu zip points, %zu building boxes, %zu tree anchors\n", coll_->n, coll_->zips.size(), boxes.size(), trees.size());
+  return true;
+}
+
+// collision.js makeRaycast: nearest collision solid, then the analytic terrain marched up to that distance
+namespace {
+template<class G> bool terrainHit(const G& g, double ox, double oy, double oz, double dx, double dy, double dz, double tMax, Hit& out) {
+  const double horiz = std::hypot(dx, dz), minY = -2.0, maxY = 0.35; // terrain is confined to this band
+  double tA = 0, tB = tMax;
+  if (dy < 0) { tA = std::max(0.0, (maxY - oy) / dy); tB = std::min(tMax, (minY - oy) / dy); }
+  else if (oy > maxY) return false;
+  else tB = std::min({tMax, 200.0, dy > 1e-6 ? (maxY - oy) / dy : double(INF)}); // near-horizontal ray: curbs only
+  if (tA > tB) return false;
+  const double step = horiz > 1e-6 ? std::min(0.25 / horiz, std::max(tB - tA, 0.0) + 1e-3) : (tB - tA);
+  double prevT = tA;
+  if (!(oy + dy * tA > g(ox + dx * tA, oz + dz * tA))) return false;
+  for (double t = tA + step;; t += step) {
+    const double tt = std::min(t, tB);
+    if (oy + dy * tt <= g(ox + dx * tt, oz + dz * tt)) {
+      double lo = prevT, hi = tt;
+      for (int k = 0; k < 22; k++) { const double m = (lo + hi) / 2; if (oy + dy * m > g(ox + dx * m, oz + dz * m)) lo = m; else hi = m; }
+      const double hx = ox + dx * hi, hz = oz + dz * hi;
+      const double gA = g(ox + dx * lo, oz + dz * lo), gB = g(hx, hz);
+      Vec3 n{0, 1, 0}; double py = gB;
+      if (gB - gA > 0.03 && oy + dy * lo < gB) { // hit the riser of a step (curb face)
+        const bool ax = std::fabs(dx) > std::fabs(dz);
+        n = ax ? Vec3{float(dx > 0 ? -1 : 1), 0, 0} : Vec3{0, 0, float(dz > 0 ? -1 : 1)};
+        py = oy + dy * hi;
+      }
+      out.point = {float(hx), float(py), float(hz)}; out.normal = n; out.distance = float(hi);
+      return true;
+    }
+    prevT = tt;
+    if (tt >= tB) break;
+  }
+  return false;
+}
+}  // namespace
+
+bool World::rayBaked(const Vec3& o, const Vec3& dir, float maxDist, Hit& out) const {
+  const double len0 = std::sqrt(double(dir.x) * dir.x + double(dir.y) * dir.y + double(dir.z) * dir.z), len = len0 > 0 ? len0 : 1;
+  const Vec3 d{float(dir.x / len), float(dir.y / len), float(dir.z / len)};
+  float best = maxDist; bool found = false;
+  BakedCast h;
+  if (coll_->cast(o, d, maxDist, h)) {
+    best = h.t; found = true;
+    out.point = o + d * h.t; out.normal = h.n; out.distance = h.t;
+  }
+  auto g = [this](double x, double z) { return double(terrainAt(float(x), float(z))); };
+  if (d.y < -1e-6f || o.y < terrainAt(o.x, o.z) + 0.3f) {
+    Hit t;
+    if (terrainHit(g, o.x, o.y, o.z, d.x, d.y, d.z, best, t)) { out = t; found = true; }
+  }
+  return found;
 }

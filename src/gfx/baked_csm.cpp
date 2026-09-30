@@ -5,13 +5,16 @@
 
 bool BakedCSM::configure(const Json::Value& config, const Vec3& sunDirection) {
   frame = 0; splits_.clear(); cascades.clear();
-  if (!config["splits"].isArray() || config["splits"].size() != 4 || config["mapSize"].asInt() <= 0) return false;
+  // render/csm.js: N = quality.cascades (splits has N + 1 entries); the far cascade is half resolution when N > 2
+  if (!config["splits"].isArray() || config["splits"].size() < 2 || config["splits"].size() > 6 || config["mapSize"].asInt() <= 0) return false;
   for (const auto& split : config["splits"]) splits_.push_back(split.asDouble());
   size_ = config["mapSize"].asInt(); sun_ = sunDirection.normalized();
-  cascades.resize(3);
-  for (int i = 0; i < 3; i++) {
-    cascades[i].size = i == 2 ? size_ / 2 : size_;
-    cascades[i].radius = i == 0 ? 1.6f : i == 1 ? 1.25f : 0.66f;
+  const int n = int(splits_.size()) - 1;
+  const float radii[] = {1.6f, 1.25f, 1.1f, 1.0f, 1.0f};
+  cascades.resize(n);
+  for (int i = 0; i < n; i++) {
+    cascades[i].size = i == n - 1 && n > 2 ? size_ >> 1 : size_;
+    cascades[i].radius = radii[i] * (cascades[i].size < size_ ? 0.6f : 1.f);
   }
   return true;
 }
@@ -23,8 +26,8 @@ void BakedCSM::update(const Camera& camera) {
   const double tanV = std::tan(std::max(double(camera.fov), 80.0) * 3.14159265358979323846 / 360);
   const double tanH = tanV * std::max(double(camera.aspect), 16.0 / 9);
   const double k2 = tanV * tanV + tanH * tanH;
-  const int periods[] = {1, 2, 4}; const double padding[] = {1, 1.06, 1.12};
-  for (int i = 0; i < 3; i++) {
+  const int periods[] = {1, 2, 4, 8, 8}; const double padding[] = {1, 1.06, 1.12, 1.15, 1.15};
+  for (int i = 0; i < int(cascades.size()); i++) {
     auto& c = cascades[i]; c.due = frame == 1 || (frame + i) % periods[i] == 0;
     if (!c.due) continue;
     const double n = std::max(splits_[i], double(camera.zNear)), f = std::min(splits_[i + 1], double(camera.zFar));
@@ -63,7 +66,8 @@ bool validateBakedCSM(const std::string& directory) {
     camera.fov = frame["camera"]["fov"].asFloat(); camera.aspect = frame["camera"]["aspect"].asFloat();
     camera.zNear = frame["camera"]["zNear"].asFloat(); camera.zFar = frame["camera"]["zFar"].asFloat();
     csm.update(camera);
-    for (int i = 0; i < 3; i++) {
+    if (frame["cascades"].size() != csm.cascades.size()) { std::fprintf(stderr, "[baked-csm] cascade count mismatch\n"); return false; }
+    for (int i = 0; i < int(csm.cascades.size()); i++) {
       const auto& expected = frame["cascades"][i]; const auto& actual = csm.cascades[i];
       bool ok = actual.due == expected["due"].asBool() && actual.size == expected["size"].asInt();
       for (int j = 0; j < 16; j++) {

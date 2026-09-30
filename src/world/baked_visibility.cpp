@@ -3,8 +3,8 @@
 #include <fstream>
 #include <cstdio>
 
-bool BakedVisibility::open(const Json::Value& meshes, const Json::Value& objects) {
-  items_.clear(); states_.clear(); near_.clear();
+bool BakedVisibility::open(const Json::Value& meshes, const Json::Value& objects, double lodScale) {
+  items_.clear(); states_.clear(); near_.clear(); lk_ = lodScale;
   if (meshes.size() != objects.size()) return false;
   for (Json::ArrayIndex i = 0; i < meshes.size(); i++) {
     const auto& mesh = meshes[i]; const auto& center = objects[i]["tileCenter"];
@@ -26,7 +26,7 @@ void BakedVisibility::update(const Vec3& position) {
   // Update each hysteresis state once, then share it with the matching facade LOD.
   for (const auto& item : items_) if (item.managed && (item.kind == "facadeLod" || item.kind == "roofs")) {
     const double d = std::hypot(std::max(0.0, std::abs(position.x - item.x) - 128), std::max(0.0, std::abs(position.z - item.z) - 128));
-    bool& close = near_.at(item.group); close = d < (close ? 690 : 650);
+    bool& close = near_.at(item.group); close = d < (close ? 690 * lk_ : 650 * lk_);
   }
   for (size_t i = 0; i < items_.size(); i++) {
     const auto& item = items_[i]; if (!item.managed) continue;
@@ -36,10 +36,10 @@ void BakedVisibility::update(const Vec3& position) {
     auto& state = states_[i];
     if (item.kind == "facade") { if (near_.contains(item.group)) state.visible = near_.at(item.group); }
     else if (item.kind == "facadeLod") state.visible = !near_.at(item.group);
-    else if (item.kind == "detail") { state.visible = d < 450; state.shadow = d < 160; }
-    else if (item.kind == "roofs") { state.visible = near_.at(item.group); state.shadow = d < 230; }
-    else if (item.kind == "roofAO") state.visible = d < 520;
-    else if (item.kind == "roofStreaks") state.visible = d < 690;
+    else if (item.kind == "detail") { state.visible = d < 450 * lk_; state.shadow = d < 160 * lk_; }
+    else if (item.kind == "roofs") { state.visible = near_.at(item.group); state.shadow = d < 230 * lk_; }
+    else if (item.kind == "roofAO") state.visible = d < 520 * lk_;
+    else if (item.kind == "roofStreaks") state.visible = d < 690 * lk_;
     else if (item.kind == "signage") { state.visible = d < 850; state.shadow = d < 120; }
     else if (item.kind == "signageGhost") state.visible = d < 520;
   }
@@ -53,7 +53,7 @@ bool validateBakedVisibility(const std::string& directory, const std::string& sh
   Json::Value geometry, shaders, reference;
   if (!read(std::filesystem::path(directory) / "geometry.json", geometry) || !read(std::filesystem::path(shaderDirectory) / "manifest.json", shaders) ||
       !read(std::filesystem::path(directory) / "tile-queries.json", reference) || reference["format"].asString() != "SBTILECHECK1") return false;
-  BakedVisibility visibility; if (!visibility.open(geometry["meshes"], shaders["shadowObjects"])) return false;
+  BakedVisibility visibility; if (!visibility.open(geometry["meshes"], shaders["shadowObjects"], shaders.get("lodScale", 1.0).asDouble())) return false;
   size_t count = 0;
   for (const auto& frame : reference["frames"]) {
     const auto& p = frame["position"]; visibility.update({p[0].asFloat(), p[1].asFloat(), p[2].asFloat()});

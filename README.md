@@ -43,11 +43,14 @@ Para gerar a referência fiel da cidade a partir do JS original instalado em
 ```bash
 cd ../spiderbench-remake && npm ci && cd ../spiderbench-native
 npm ci                                  # canvas 2D para o bake headless
-cmake --build build --target bake_city
+cmake --build build --target bake_city       # preset "med" do remake
+cmake --build build --target bake_city_low   # preset "low" (GPUs integradas)
 ```
 
-O alvo `bake_city` executa os bakes em sequência e valida seus resultados.
-Os arquivos gerados ficam em `build/city-bake/` e `build/refshaders/`.
+Os alvos executam os bakes em sequência e validam seus resultados.
+Os arquivos gerados ficam em `build/city-bake/` + `build/refshaders/` (med) e
+`build/city-bake-low/` + `build/refshaders-low/` (low). Os scripts aceitam
+`SB_QUALITY`, `SB_BAKE_DIR` e `SB_SHADER_DIR`.
 
 As DLLs de runtime (SDL2, zlib, jsoncpp, libstdc++) são copiadas para `build/` automaticamente. O executável
 procura `assets/` ao lado de si e, se não encontrar, na pasta do código-fonte. `RelWithDebInfo` mantém o console
@@ -78,7 +81,7 @@ build/spiderbench.exe --test 12 --scene 0 --out saida/
 
 Roda input roteirizado a 60 Hz fixos, registra o estado da travessia (`[test] modo/sub-estado/posição/velocidade`),
 salva screenshots e sinaliza violações de invariantes (`position jump`, `BUG: left 'swing'`). Cenas:
-0 corrida + cadeia de swings + zip + poleiro · 1 corrida na parede · 2 Central Park (âncoras em árvores) · 3 Financial District · 4 agarrado na parede (cling) · 5 poleiro parado.
+0 corrida + cadeia de swings + zip + poleiro · 1 corrida na parede · 2 Central Park (âncoras em árvores) · 3 Financial District · 4 agarrado na parede (cling) · 5 poleiro parado · 6 parado ao sol no Central Park (sombras do personagem).
 O log inclui o nó e o clip do animador (`anim=swing#L | swingLowL`).
 Variáveis de debug: `SB_GLDEBUG=1` (erros GL), `SB_DEBUGVIEW=1|2` (termo de sombra / n·l), `SB_NOREVZ=1`, `SB_LOGALL=1`.
 
@@ -122,8 +125,14 @@ As listas completas dos 85 pools de LOD também foram exportadas e vinculadas
 às malhas, cobrindo 550.880 entradas de instâncias.
 O bake captura 62 texturas com pixels (incluindo o DFG LUT do Three.js) e 348 vínculos de textura a programas;
 dois render targets dependem da execução e não têm pixels iniciais.
-O executável ainda usa a cidade procedural simplificada: a ligação das malhas,
-dos materiais e dos shaders originais está disponível no modo de inspeção:
+Quando o bake existe, o modo de jogo usa a cidade original: renderização com os
+programas capturados e todas as consultas da travessia sobre a colisão exata
+(`--procedural` volta à cidade simplificada; `--quality low` usa o bake low).
+`bake_traversal.mjs` exporta o terreno analítico (`terrainHeight`) como raster em
+paleta de 0,25 m (0,011% de divergência nas amostras), 27.881 árvores de ancoragem e
+consultas de referência; `--validate-baked-traversal` confirma que `groundHeight`
+(1.500), `raycast` (3.000) e `getZipPoints` (200) batem com o JS original.
+Validações e modo de inspeção:
 
 ```powershell
 .\build\msvc\Release\spiderbench.exe --validate-baked-shaders
@@ -131,6 +140,7 @@ dos materiais e dos shaders originais está disponível no modo de inspeção:
 .\build\msvc\Release\spiderbench.exe --validate-baked-csm
 .\build\msvc\Release\spiderbench.exe --validate-baked-tiles
 .\build\msvc\Release\spiderbench.exe --validate-baked-environment
+.\build\msvc\Release\spiderbench.exe --validate-baked-traversal
 .\build\msvc\Release\spiderbench.exe --view-bake
 .\build\msvc\Release\spiderbench.exe --view-bake --test 1 --out build/baked-preview
 ```
@@ -146,6 +156,15 @@ LUT atmosférica, cubemap e PMREM GGX de 768 × 1024. O céu usa o passe origina
 em meia resolução. A composição atmosférica, seis níveis de bloom, exposição
 automática, TAA e correção de cor executam 15 passes capturados de `pipeline.js`.
 O TAA preserva o jitter Halton de 16 frames, reprojeção e histórico alternado.
-Ainda faltam AO, SSGI, reflexos, shafts/flare, efeitos de câmera e a ligação
-das colisões antes de usar essa cidade no modo de jogo. A fidelidade de imagem
-ainda precisa de comparação com capturas do navegador na mesma câmera.
+O personagem usa os programas originais: `capture_shaders.mjs --character` roda o
+`loadCharacter` do remake (material `SpiderSuit` do GLB + patch `suitfabric.js`,
+skinning por `boneTexture`) e grava 4 programas e 6 texturas em `<shaders>/character`
+e `<bake>/character`. O nativo desenha o traje e as lentes com a iluminação IBL/CSM
+da cidade, projeta a sombra do jogador nas cascatas 0–2 e na cascata dedicada
+`CSM_char` do `csm.js` (1024 px a até 25 m da câmera, só no preset med).
+A cena de teste 6 deixa o personagem parado ao sol no Central Park.
+Ainda faltam AO, SSGI, reflexos, shafts/flare, efeitos de câmera e a máscara de
+movimento do personagem no TAA. A fidelidade de
+imagem ainda precisa de comparação com capturas do navegador na mesma câmera.
+`SB_PROFILE=1` mostra o tempo de CPU por quadro e `SB_PROFILE=2` o tempo de GPU
+por fase (sombras, céu, cidade, pós).

@@ -8,6 +8,9 @@
 //
 // Test mode:  spiderbench --test [seconds] [--out dir]   scripted input at a fixed 60 Hz step; logs the traversal state
 //             and saves screenshots (verification without a human at the controls)
+// City:       the original city exported by tools/ref (build/city-bake, or build/city-bake-low with --quality low) when
+//             present; --procedural forces the simplified
+//             native city. --validate-baked-traversal compares the gameplay queries with the original JS answers.
 #include <SDL.h>
 #include "gfx/gl.h"
 #include "gfx/renderer.h"
@@ -15,6 +18,7 @@
 #include "gfx/baked_city.h"
 #include "gfx/texture.h"
 #include "world/world.h"
+#include "world/baked_traversal.h"
 #include "player/player.h"
 #include "ui/hud.h"
 #include "audio/audio.h"
@@ -38,7 +42,8 @@ struct App {
   Input input;
   Hud hud;
   Audio audio;
-  bool help = true, running = true, music = true;
+  BakedCity* city = nullptr; // original city renderer (null: procedural city meshes)
+  bool help = true, running = true, music = true; // help overlay: off in --test (screenshots)
   float fps = 60, time = 0, districtT = 0;
   std::string district;
   // test mode
@@ -83,7 +88,8 @@ void teleportTo(App& a, int k) {
     {{250, 0, 60}, PI},                                          // 5 rooftop above Midtown
   };
   Spot s = spots[std::clamp(k, 0, 4)];
-  if (k == 4) s.p.y = a.world.groundHeight(262, 60) + 1.2f, s.p.x = 262;
+  if (k == 4 && a.city) s.p = {278, a.world.groundHeight(278, 138) + 1.2f, 138}; // original city: the 24 m roof east of 5th Av
+  else if (k == 4) s.p.y = a.world.groundHeight(262, 60) + 1.2f, s.p.x = 262;
   a.player.teleport(s.p, s.yaw);
 }
 
@@ -130,9 +136,17 @@ void testScript(App& a, float t) {
   Input& I = a.input;
   auto at = [&](float t0, float t1) { return t >= t0 && t < t1; };
   auto key = [&](SDL_Scancode k, bool on) { if (on) I.press(k); else I.release(k); };
+  // original city: the facade on the west side of 5th Av (x = 234, z 169-231) is 10 m to the right of this spot
+  const bool baked = a.city != nullptr;
+  if ((a.testScene == 1 || a.testScene == 4) && baked && t < 0.05f) a.player.teleport({244, 1.2f, 190}, 0);
   if (a.testScene == 4) { // wall cling: run into the facade, then let go of every key on the wall
     key(SDL_SCANCODE_D, at(0.3f, 6.5f)); key(SDL_SCANCODE_LSHIFT, at(0.3f, 6.5f));
-    if (at(0.3f, 0.6f)) I.look(0, -40);
+    if (at(0.3f, 0.6f) && !baked) I.look(0, -40);
+    return;
+  }
+  if (a.testScene == 6) { // walk into the open Central Park lawn and stand in the sun (character shadows / self-shadowing)
+    if (t < 0.05f) teleportTo(a, 1);
+    key(SDL_SCANCODE_W, at(0.3f, 2.3f));
     return;
   }
   if (a.testScene == 5) { // perch: swing, zip to the highlighted point, stay crouched on it
@@ -143,7 +157,7 @@ void testScript(App& a, float t) {
   }
   if (a.testScene == 1) { // Shift + D into the facade west of 5th Av -> wall run up -> roof
     key(SDL_SCANCODE_D, at(0.3f, 60)); key(SDL_SCANCODE_LSHIFT, at(0.3f, 60));
-    if (at(0.3f, 0.6f)) I.look(0, -40);
+    if (at(0.3f, 0.6f) && !baked) I.look(0, -40);
     return;
   }
   if (a.testScene == 2 || a.testScene == 3) {
@@ -203,16 +217,19 @@ int viewBake(App& a, const std::string& directory, const std::string& shaders) {
 
 int main(int argc, char** argv) {
   App a;
+  if (const char* size = std::getenv("SB_SIZE")) std::sscanf(size, "%dx%d", &a.w, &a.h); // window size, e.g. SB_SIZE=800x450
   bool validateBake = false;
   bool validatePools = false;
   bool validateCSM = false;
   bool validateTiles = false;
   bool validateEnvironment = false;
   bool previewBake = false;
+  bool procedural = false;
+  bool validateTraversal = false;
   std::string shaderDirectory = SB_SOURCE_SHADERS;
   std::string bakeDirectory = SB_SOURCE_BAKE;
   for (int i = 1; i < argc; i++) {
-    if (!std::strcmp(argv[i], "--test")) { a.test = true; if (i + 1 < argc && argv[i + 1][0] != '-') a.testLen = (float)std::atof(argv[++i]); }
+    if (!std::strcmp(argv[i], "--test")) { a.test = true; a.help = std::getenv("SB_HELP") != nullptr; if (i + 1 < argc && argv[i + 1][0] != '-') a.testLen = (float)std::atof(argv[++i]); }
     else if (!std::strcmp(argv[i], "--out") && i + 1 < argc) a.outDir = argv[++i];
     else if (!std::strcmp(argv[i], "--scene") && i + 1 < argc) a.testScene = std::atoi(argv[++i]);
     else if (!std::strcmp(argv[i], "--validate-baked-shaders")) validateBake = true;
@@ -222,7 +239,17 @@ int main(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "--validate-baked-environment")) validateEnvironment = true;
     else if (!std::strcmp(argv[i], "--shader-dir") && i + 1 < argc) shaderDirectory = argv[++i];
     else if (!std::strcmp(argv[i], "--view-bake")) previewBake = true;
+    else if (!std::strcmp(argv[i], "--procedural")) procedural = true;
+    else if (!std::strcmp(argv[i], "--quality") && i + 1 < argc) { // the remake's preset of the bake (bake_city_low -> low)
+      const std::string q = argv[++i], suffix = q == "med" ? "" : "-" + q;
+      bakeDirectory = std::string(SB_SOURCE_BAKE) + suffix; shaderDirectory = std::string(SB_SOURCE_SHADERS) + suffix;
+    }
+    else if (!std::strcmp(argv[i], "--validate-baked-traversal")) validateTraversal = true;
     else if (!std::strcmp(argv[i], "--bake-dir") && i + 1 < argc) bakeDirectory = argv[++i];
+  }
+  if (validateTraversal) { // CPU only: no window needed
+    World world;
+    return world.loadBaked(bakeDirectory) && validateBakedTraversal(world, (std::filesystem::path(bakeDirectory) / "traversal_queries.json").string()) ? 0 : 1;
   }
   if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) { std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 1; }
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
@@ -248,6 +275,13 @@ int main(int argc, char** argv) {
     BakedPrograms programs;
     BakedEnvironment environment;
     bool ok = validateEnvironment ? environment.open((std::filesystem::path(bakeDirectory) / "environment").string()) && environment.validate((std::filesystem::path(bakeDirectory) / "environment/native-check.json").string()) : validateTiles ? validateBakedVisibility(bakeDirectory, shaderDirectory) : validateCSM ? validateBakedCSM(bakeDirectory) : validatePools ? validateBakedPools(bakeDirectory) : programs.open(shaderDirectory) && programs.validateAll();
+    if (ok && validateBake) { // the player model's programs (capture_shaders.mjs --character), when captured
+      const std::string characterShaders = (std::filesystem::path(shaderDirectory) / "character").string();
+      BakedPrograms character;
+      if (std::filesystem::exists(std::filesystem::path(characterShaders) / "manifest.json"))
+        ok = character.open(characterShaders) && character.validateAll();
+      character.clear();
+    }
     environment.clear();
     programs.clear();
     SDL_GL_DeleteContext(a.gl); SDL_DestroyWindow(a.win); SDL_Quit();
@@ -261,15 +295,26 @@ int main(int argc, char** argv) {
     int result = viewBake(a, bakeDirectory, shaderDirectory);
     SDL_GL_DeleteContext(a.gl); SDL_DestroyWindow(a.win); SDL_Quit(); return result;
   }
-  loadingFrame(a, "Gerando a cidade", 0.2f);
   uint32_t t0 = SDL_GetTicks();
-  a.world.build(1234);
-  a.world.upload();
-  std::printf("[world] built in %u ms\n", SDL_GetTicks() - t0);
+  BakedCity bakedCity;
+  const bool haveBake = !procedural && std::filesystem::exists(std::filesystem::path(bakeDirectory) / "traversal.sbtrv");
+  if (haveBake) {
+    loadingFrame(a, "Carregando a cidade", 0.2f);
+    if (!a.world.loadBaked(bakeDirectory) || !bakedCity.open(bakeDirectory, shaderDirectory)) {
+      std::fprintf(stderr, "[world] baked city unavailable (run the bake_city target or pass --procedural)\n"); return 1;
+    }
+    a.city = &bakedCity;
+  } else {
+    loadingFrame(a, "Gerando a cidade", 0.2f);
+    a.world.build(1234);
+    a.world.upload();
+  }
+  std::printf("[world] %s city ready in %u ms\n", a.city ? "baked" : "procedural", SDL_GetTicks() - t0);
   loadingFrame(a, "Carregando o personagem", 0.7f);
   a.camera.aspect = (float)a.w / a.h;
   if (!a.player.init(a.world, a.camera)) { std::fprintf(stderr, "player init failed\n"); return 1; }
   a.charGpu.build(a.player.rig);
+  if (a.city && !bakedCity.openCharacter(a.player.rig)) std::fprintf(stderr, "[baked-char] using the native character shader\n");
   loadingFrame(a, "Áudio", 0.9f);
   if (!a.test) a.audio.init();
 
@@ -304,13 +349,24 @@ int main(int argc, char** argv) {
     if (a.test) testScript(a, a.time);
 
     a.camera.aspect = (float)a.w / std::max(a.h, 1);
+    static const bool profile = std::getenv("SB_PROFILE") != nullptr;
+    const uint64_t p0 = SDL_GetPerformanceCounter();
     a.player.update(dt, a.input, a.test ? nullptr : &a.audio);
+    const uint64_t p1 = SDL_GetPerformanceCounter();
     FrameInput f;
     f.cam = &a.camera; f.world = &a.world; f.rig = &a.player.rig; f.character = &a.charGpu;
     f.characterVisible = a.player.meshVisible; f.webs = &a.player.web.lines(); f.time = a.time;
-    f.motionBlur = a.player.cam->motionBlur;
+    f.motionBlur = a.player.cam->motionBlur; f.bakedCity = a.city; f.dt = dt; f.focus = a.player.trav->rootPos;
     a.renderer.render(f);
+    if (a.city && !a.city->healthy) { std::fprintf(stderr, "[baked-city] render failed\n"); a.running = false; }
     drawHud(a);
+    if (profile) { // SB_PROFILE=1: CPU time of the simulation and of the frame submission, averaged per second
+      static double simMs = 0, drawMs = 0; static int frames = 0;
+      const double f2ms = 1000.0 / SDL_GetPerformanceFrequency(); const uint64_t p2 = SDL_GetPerformanceCounter();
+      simMs += (p1 - p0) * f2ms; drawMs += (p2 - p1) * f2ms;
+      if (++frames == 60) { std::printf("[profile] update %.2f ms, render %.2f ms | %zu draws, %zu shadow draws, %.2f M triangles\n", simMs / frames, drawMs / frames,
+                                          a.city ? a.city->drawn : size_t(0), a.city ? a.city->shadowDrawn : size_t(0), a.city ? a.city->triangles / 1e6 : 0.0); simMs = drawMs = 0; frames = 0; }
+    }
     if (a.test) {
       const auto& s = a.player.trav->s;
       logT += dt;
@@ -326,6 +382,7 @@ int main(int argc, char** argv) {
     SDL_GL_SwapWindow(a.win);
   }
   a.audio.shutdown();
+  bakedCity.clear();
   SDL_GL_DeleteContext(a.gl);
   SDL_DestroyWindow(a.win);
   SDL_Quit();

@@ -1,13 +1,14 @@
 // Validate baked pixel data and every program/material texture binding.
+import { BAKE, SHADERS } from './paths.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 
-const dir = path.resolve('build/city-bake');
+const dir = BAKE;
 const textureBake = JSON.parse(fs.readFileSync(path.join(dir, 'textures.json')));
 const geometry = JSON.parse(fs.readFileSync(path.join(dir, 'geometry.json')));
-const shaders = JSON.parse(fs.readFileSync(path.resolve('build/refshaders/manifest.json')));
+const shaders = JSON.parse(fs.readFileSync(path.join(SHADERS, 'manifest.json')));
 if (textureBake.format !== 'SBTEX1' || textureBake.version !== 1 ||
     textureBake.source !== geometry.source || textureBake.source !== shaders.source ||
     textureBake.threeRevision !== geometry.threeRevision || textureBake.threeRevision !== shaders.threeRevision ||

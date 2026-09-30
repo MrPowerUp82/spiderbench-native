@@ -1,5 +1,6 @@
 // Validate the compact pool archive, then use the original Pool methods as the
 // oracle for native selection, repack thresholds, rotation and shadow prefixes.
+import { BAKE, SHADERS } from './paths.mjs';
 import { SRC_ROOT } from './stubs.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -10,7 +11,7 @@ const imp = p => import(pathToFileURL(path.join(SRC_ROOT, p)).href);
 const THREE = await imp('node_modules/three/build/three.module.js');
 const { Pool } = await imp('src/world/pool.js');
 const { CSM } = await imp('src/render/csm.js');
-const dir = path.resolve('build/city-bake');
+const dir = BAKE;
 const source = JSON.parse(zlib.gunzipSync(fs.readFileSync(path.join(dir, 'pools.json.gz'))));
 const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'pool-data.json')));
 const geometry = JSON.parse(fs.readFileSync(path.join(dir, 'geometry.json')));

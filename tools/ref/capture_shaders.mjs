@@ -1,5 +1,8 @@
 // Capture the actual Three.js programs after lighting.js has installed its global
-// surface and CSM patches. Run with `node tools/ref/capture_shaders.mjs [--city]`.
+// surface and CSM patches. Run with `node tools/ref/capture_shaders.mjs [--city | --character]`.
+// --character: the player model from player/rig.js loadCharacter (GLB materials + suitfabric.js patch, skinning),
+// main and shadow-depth programs, written to <shaders>/character and <bake>/character.
+import { BAKE, SHADERS } from './paths.mjs';
 import { SRC_ROOT, renderer as buildRenderer } from './stubs.mjs';
 import './scene_instrumentation.mjs';
 import { createMockGL } from './mockgl.mjs';
@@ -16,7 +19,10 @@ const { getDFGLUT } = await imp('node_modules/three/src/renderers/shaders/DFGLUT
 const { WebGLMaterials } = await imp('node_modules/three/src/renderers/webgl/WebGLMaterials.js');
 const { createLighting } = await imp('src/render/lighting.js');
 const args = new Set(process.argv.slice(2));
-const out = path.resolve(args.has('--city') ? 'build/refshaders' : 'build/refshaders-smoke');
+const character = args.has('--character');
+const full = args.has('--city') || character; // passes, textures and texture manifest
+const out = character ? path.join(SHADERS, 'character') : args.has('--city') ? SHADERS : path.resolve('build/refshaders-smoke');
+const bakeOut = character ? path.join(BAKE, 'character') : BAKE;
 fs.mkdirSync(out, { recursive: true });
 for (const name of fs.readdirSync(out)) {
   if (/^\d{4}\.(vert|frag)\.glsl$/.test(name) || name === 'manifest.json')
@@ -52,7 +58,17 @@ const captureTarget = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatT
 renderer.setRenderTarget(captureTarget);
 
 const targets = [];
-if (args.has('--city')) {
+if (character) {
+  const { loadCharacter } = await imp('src/player/rig.js');
+  const { suitFabricReady } = await imp('src/player/suitfabric.js');
+  const rig = await loadCharacter(buildRenderer);
+  if (rig.source !== 'glb') throw new Error('character GLB did not load');
+  // the fabric detail maps load asynchronously; uFabOn switches to 1 once both are in (as in the game)
+  await Promise.race([suitFabricReady, new Promise((_, reject) => setTimeout(() => reject(new Error('suit fabric textures did not load')), 20000))]);
+  lighting.csm.setCharacter(rig.object);
+  rig.object.updateMatrixWorld(true);
+  rig.object.traverse(o => { if (o.isMesh && o.geometry?.attributes.position && o.material) targets.push(o); });
+} else if (args.has('--city')) {
   const { buildCity } = await imp('src/world/city.js');
   const cityScene = new THREE.Scene();
   await buildCity({ scene: cityScene, renderer: buildRenderer });
@@ -107,8 +123,8 @@ function uniformValue(value) {
   }
   return undefined;
 }
-const texDir = path.resolve('build/city-bake/texture-pixels');
-if (args.has('--city')) {
+const texDir = path.join(bakeOut, 'texture-pixels');
+if (full) {
   fs.mkdirSync(texDir, { recursive: true });
   for (const name of fs.readdirSync(texDir))
     if (/^\d{4}\.bin\.z$/.test(name)) fs.rmSync(path.join(texDir, name));
@@ -135,6 +151,9 @@ function textureId(texture) {
       bytes = Buffer.from(a.buffer, a.byteOffset, a.byteLength);
       arrayType = 'Uint8ClampedArray';
     } catch (error) { pixelError = String(error); }
+    // an image drawn before it finished decoding reads back fully transparent black
+    if (bytes && image.src !== undefined && bytes.every(v => v === 0))
+      throw new Error(`texture ${texture.name || image.src || id} has no decoded pixels`);
   }
   const name = String(id).padStart(4, '0') + '.bin.z';
   if (bytes) fs.writeFileSync(path.join(texDir, name), zlib.deflateSync(bytes, { level: 1 }));
@@ -177,7 +196,9 @@ for (const [objectOrdinal, object] of targets.entries()) {
     probe.castShadow = object.castShadow;
     probe.receiveShadow = object.receiveShadow;
     let drawable = probe;
-    if (object.isInstancedMesh) {
+    const savedMaterial = object.material;
+    if (object.isSkinnedMesh) drawable = object; // USE_SKINNING variants need the bound skeleton
+    else if (object.isInstancedMesh) {
       // An InstancedMesh is required for the USE_INSTANCING program variant.
       const inst = new THREE.InstancedMesh(object.geometry, material, 1);
       // This controls USE_INSTANCING_COLOR in Three's program key. A newly
@@ -187,8 +208,9 @@ for (const [objectOrdinal, object] of targets.entries()) {
       drawable = inst;
     }
     // Main scene and unshadowed river-mirror passes have different program keys.
-    const depth = args.has('--city') ? depthMaterial(object, material) : null;
-    for (const [pass, shadows] of args.has('--city') ? [['main', true], ['mirror', false], ['depth', false]] : [['main', true]]) {
+    const depth = full ? depthMaterial(object, material) : null;
+    const passes = character ? [['main', true], ['depth', false]] : args.has('--city') ? [['main', true], ['mirror', false], ['depth', false]] : [['main', true]];
+    for (const [pass, shadows] of passes) {
       const activeMaterial = pass === 'depth' ? depth : material;
       drawable.material = activeMaterial;
       renderer.shadowMap.enabled = shadows;
@@ -243,7 +265,7 @@ for (const [objectOrdinal, object] of targets.entries()) {
         instanced: !!object.isInstancedMesh, instanceColor: !!object.instanceColor, attributes: Object.keys(object.geometry.attributes),
         uniformValues: values,
         customUniforms: Object.keys(props.uniforms ?? {}).filter(k => /^u[A-Z]|^(ambData|csmData)$/.test(k)) });
-      if (args.has('--city')) {
+      if (full) {
         const uniforms = {};
         for (const [name, uniform] of Object.entries(props.uniforms ?? {})) {
           const tid = textureId(uniform?.value);
@@ -258,14 +280,15 @@ for (const [objectOrdinal, object] of targets.entries()) {
       }
     }
     renderer.shadowMap.enabled = true;
-    drawable.material = material;
+    drawable.material = object.isSkinnedMesh ? savedMaterial : material;
   }
 }
 fs.writeFileSync(path.join(out, 'manifest.json'), JSON.stringify({
   source: SRC_ROOT, threeRevision: THREE.REVISION, timeOfDay: lighting.tod.name,
   reversedDepth: true, environmentMapping: 'CubeUVReflectionMapping',
   quality: lighting.quality.name, cascadeCount: lighting.csm.N,
-  shadowConfig: { splits: lighting.csm.splits, mapSize: lighting.csm.size },
+  lodScale: Math.min(1.5, Math.max(0.3, Number(lighting.quality.lodScale) || 1)), // render/quality.js lodScale()
+  shadowConfig: { splits: lighting.csm.splits, mapSize: lighting.csm.size, charSize: lighting.csm.charSize },
   sunDirection: lighting.sun.position.clone().sub(lighting.sun.target.position).normalize().toArray(),
   environmentIntensity: scene.environmentIntensity,
   shadowObjects: targets.map((o, objectOrdinal) => ({ objectOrdinal, layers: o.layers.mask,
@@ -278,8 +301,9 @@ fs.writeFileSync(path.join(out, 'manifest.json'), JSON.stringify({
   shadowTaps: lighting.quality.shadowTaps, charCascade: !!lighting.csm.charLight,
   entries, usages, objectPrograms,
 }, null, 2));
-if (args.has('--city')) {
-  fs.writeFileSync(path.resolve('build/city-bake/textures.json'), JSON.stringify({
+if (full) {
+  fs.mkdirSync(bakeOut, { recursive: true });
+  fs.writeFileSync(path.join(bakeOut, 'textures.json'), JSON.stringify({
     format: 'SBTEX1', version: 1, source: SRC_ROOT, threeRevision: THREE.REVISION,
     textures: textureEntries, bindings: textureBindings,
   }));
@@ -293,4 +317,4 @@ for (const e of lit) {
   }
 }
 console.log(`captured ${entries.length} programs, ${usages.length} material/geometry variants from ${targets.length} meshes in ${out}`);
-if (args.has('--city')) console.log(`captured ${textureEntries.length} textures (${textureEntries.filter(t => t.file).length} with pixels)`);
+if (full) console.log(`captured ${textureEntries.length} textures (${textureEntries.filter(t => t.file).length} with pixels)`);

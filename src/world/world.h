@@ -9,8 +9,11 @@
 #pragma once
 #include "core/math.h"
 #include "gfx/mesh.h"
+#include <memory>
 #include <string>
 #include <vector>
+
+class BakedCollision; class BakedTraversal;
 
 enum BoxKind : uint8_t { K_BUILDING, K_TIER, K_PARAPET, K_ROOFBOX, K_WATERTOWER, K_POLE, K_TRUNK };
 
@@ -21,6 +24,8 @@ struct TreePt { Vec3 pos; float cy, r; };
 
 class World {
  public:
+  World();
+  ~World();
   Vec3 spawn{250, 0, 160 + 5 + 2.3f};
   std::vector<Box> boxes;
   std::vector<TreePt> trees;
@@ -29,6 +34,10 @@ class World {
   GpuMesh cityGpu, farGpu;
 
   void build(uint32_t seed = 1234);
+  // The original city exported by tools/ref (collision.sbcol + traversal.sbtrv): exact solids, zip points, terrain and
+  // tree anchors replace the procedural boxes for every query (collision.js makeQueries / collide.js createCollider).
+  bool loadBaked(const std::string& directory);
+  const BakedCollision* collision() const { return coll_.get(); }
   void upload() { cityGpu.upload(cityMesh, 256); farGpu.upload(farMesh, 1500); cityMesh.clear(); farMesh.clear(); }
 
   bool raycast(const Vec3& o, const Vec3& d, float maxDist, Hit& out) const;
@@ -40,8 +49,16 @@ class World {
   void getZipPoints(const Vec3& c, float r, std::vector<ZipPoint>& out) const;
   void treesNear(const Vec3& p, float r, std::vector<const TreePt*>& out) const;
   std::string districtAt(float x, float z) const;
+  float terrainAt(float x, float z) const; // ground.js terrainHeight (baked raster or the layout port)
 
  private:
+  std::unique_ptr<BakedCollision> coll_;
+  std::unique_ptr<BakedTraversal> trav_;
+  std::vector<std::string> zipKinds_;
+  std::vector<uint32_t> zipStart_, zipItems_;
+  int zipNx_ = 0, zipNz_ = 0; float zipX0_ = 0, zipZ0_ = 0;
+  static constexpr float ZIP_CELL = 16;
+  bool rayBaked(const Vec3& o, const Vec3& d, float maxDist, Hit& out) const;
   static constexpr float CELL = 24, GX0 = -900, GZ0 = -3600;
   int gw_ = 0, gh_ = 0;
   std::vector<std::vector<int>> grid_;

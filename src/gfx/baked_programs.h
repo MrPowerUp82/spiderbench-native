@@ -4,6 +4,15 @@
 #include <string>
 #include <unordered_map>
 
+#include <vector>
+
+// Captured Three.js uniform values resolved once against a linked program (locations + flattened values).
+struct CapturedUniforms {
+  struct Entry { GLint location = -1; GLenum type = 0; GLsizei count = 0; std::vector<float> values; };
+  std::vector<Entry> list;
+  void build(Shader& shader, const Json::Value& values);
+  void upload() const; // program must be in use
+};
 void uploadCapturedUniforms(Shader& shader, const Json::Value& values);
 
 // Captured Three.js programs, compiled by the native driver. Conversion only

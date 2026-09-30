@@ -66,9 +66,11 @@ void applyState(const Json::Value& m) {
 bool BakedCity::open(const std::string& directory, const std::string& shaderDirectory) {
   clear();
   if (!geometry_.open((std::filesystem::path(directory) / "geometry.json").string()) ||
-      !programs_.open(shaderDirectory) || !readJson(std::filesystem::path(directory) / "textures.json", textures_) ||
-      textures_["format"].asString() != "SBTEX1" || !programs_.manifest["objectPrograms"].isArray()) return false;
-  directory_ = directory;
+      !city_.programs.open(shaderDirectory) || !readJson(std::filesystem::path(directory) / "textures.json", city_.textures) ||
+      city_.textures["format"].asString() != "SBTEX1" || !city_.programs.manifest["objectPrograms"].isArray()) return false;
+  city_.directory = directory; shaderDir_ = shaderDirectory;
+  sunDirection_ = vec(city_.programs.manifest["sunDirection"]);
+  charCascade_ = city_.programs.manifest["charCascade"].asBool();
   if (!pools_.open((std::filesystem::path(directory) / "pool-data.json").string(), geometry_.meshCount())) return false;
   for (const auto& pool : pools_.entries()) {
     const auto& mesh = geometry_.mesh(pool.meta["objectOrdinal"].asUInt());
@@ -76,7 +78,7 @@ bool BakedCity::open(const std::string& directory, const std::string& shaderDire
   }
   bindings_.resize(geometry_.meshCount());
   depthBindings_.resize(geometry_.meshCount());
-  for (const auto& bind : programs_.manifest["objectPrograms"]) {
+  for (const auto& bind : city_.programs.manifest["objectPrograms"]) {
     std::string pass = bind["pass"].asString();
     if (pass != "main" && pass != "depth") continue;
     size_t mesh = bind["objectOrdinal"].asUInt();
@@ -84,14 +86,15 @@ bool BakedCity::open(const std::string& directory, const std::string& shaderDire
     auto& list = pass == "main" ? bindings_[mesh] : depthBindings_[mesh]; size_t slot = bind["materialSlot"].asUInt();
     if (list.size() <= slot) list.resize(slot + 1, -1);
     list[slot] = bind["usageIndex"].asInt();
-    if (!programs_.manifest["usages"][list[slot]]["renderState"].isObject()) return false;
+    if (!city_.programs.manifest["usages"][list[slot]]["renderState"].isObject()) return false;
   }
-  if (!csm_.configure(programs_.manifest["shadowConfig"], vec(programs_.manifest["sunDirection"]))) return false;
-  if (!visibility_.open(geometry_.meshes(), programs_.manifest["shadowObjects"])) return false;
+  if (!csm_.configure(city_.programs.manifest["shadowConfig"], vec(city_.programs.manifest["sunDirection"]))) return false;
+  if (!visibility_.open(geometry_.meshes(), city_.programs.manifest["shadowObjects"], city_.programs.manifest.get("lodScale", 1.0).asDouble())) return false;
+  if (int(csm_.cascades.size()) > UsagePlan::MAX_CASCADES || city_.programs.manifest["cascadeCount"].asUInt() != csm_.cascades.size()) return false;
   if (!environment_.open((std::filesystem::path(directory) / "environment").string()) ||
-      environment_.manifest()["source"] != programs_.manifest["source"] ||
-      environment_.manifest()["threeRevision"] != programs_.manifest["threeRevision"] ||
-      environment_.manifest()["timeOfDay"] != programs_.manifest["timeOfDay"]) return false;
+      environment_.manifest()["source"] != city_.programs.manifest["source"] ||
+      environment_.manifest()["threeRevision"] != city_.programs.manifest["threeRevision"] ||
+      environment_.manifest()["timeOfDay"] != city_.programs.manifest["timeOfDay"]) return false;
   std::printf("[baked-city] %zu meshes, %zu materials\n", geometry_.meshCount(), geometry_.materialCount());
   return true;
 }
@@ -109,13 +112,13 @@ GLuint BakedCity::buffer(uint32_t id) {
   return b.id;
 }
 
-BakedCity::Texture* BakedCity::texture(int id) {
-  auto found = textureGpu_.find(id);
-  if (found != textureGpu_.end()) return &found->second;
-  if (id < 0 || id >= int(textures_["textures"].size())) return nullptr;
-  const auto& meta = textures_["textures"][id];
+BakedCity::Texture* BakedCity::texture(Library& lib, int id) {
+  auto found = lib.gpu.find(id);
+  if (found != lib.gpu.end()) return &found->second;
+  if (id < 0 || id >= int(lib.textures["textures"].size())) return nullptr;
+  const auto& meta = lib.textures["textures"][id];
   if (meta["file"].isNull()) return nullptr; // dynamic reflection targets are not baked
-  std::ifstream file(std::filesystem::path(directory_) / meta["file"].asString(), std::ios::binary);
+  std::ifstream file(std::filesystem::path(lib.directory) / meta["file"].asString(), std::ios::binary);
   std::vector<uint8_t> packed((std::istreambuf_iterator<char>(file)), {});
   uLongf size = (uLongf)meta["bytes"].asUInt64();
   if (size > 512ull * 1024 * 1024 || packed.empty()) return nullptr;
@@ -151,7 +154,7 @@ BakedCity::Texture* BakedCity::texture(int id) {
   glTexParameteri(t.target, GL_TEXTURE_MIN_FILTER, filter(meta["minFilter"].asInt()));
   if (meta["generateMipmaps"].asBool()) glGenerateMipmap(t.target);
   if (glGetError() != GL_NO_ERROR) { glDeleteTextures(1, &t.id); return nullptr; }
-  return &textureGpu_.emplace(id, t).first->second;
+  return &lib.gpu.emplace(id, t).first->second;
 }
 
 BakedCity::Texture& BakedCity::placeholder(GLenum target, bool shadow) {
@@ -202,7 +205,7 @@ bool BakedCity::bindMesh(size_t index, Shader& shader) {
   bool ok = true;
   for (const auto& name : meta["attributes"].getMemberNames()) {
     const auto& a = meta["attributes"][name];
-    bool instanced = programs_.manifest["shadowObjects"][Json::ArrayIndex(index)]["attributeDivisors"][name].asInt() != 0;
+    bool instanced = city_.programs.manifest["shadowObjects"][Json::ArrayIndex(index)]["attributeDivisors"][name].asInt() != 0;
     ok = ok && attribute(name, a["blob"].asUInt(), a["itemSize"].asInt(), a["normalized"].asBool(), instanced);
   }
   if (meta["instanced"].asBool()) {
@@ -258,128 +261,220 @@ bool BakedCity::drawShadows(const Camera& camera, float time) {
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) return false;
     glViewport(0, 0, c.size, c.size); glDepthMask(GL_TRUE); glClear(GL_DEPTH_BUFFER_BIT);
     if (!renderPass(camera, c.view, c.projection, Frustum(c.cullProjection * c.view), time, i)) return false;
+    // the player casts in the cascades whose camera layers include layer 0 (csm.js: cascades >= 3 see big casters only)
+    if (i <= 2 && !drawCharacterPass(true)) return false;
+  }
+  if (charMap_) { // CSM_char: only the player (CHAR_LAYER), refreshed every frame
+    updateCharacterCascade(camera);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, charMap_, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) return false;
+    glViewport(0, 0, charLight_.size, charLight_.size); glDepthMask(GL_TRUE); glClear(GL_DEPTH_BUFFER_BIT);
+    if (charNear_) {
+      beginPass(camera, charLight_.view, charLight_.projection, time, int(csm_.cascades.size()));
+      if (!drawCharacterPass(true)) return false;
+    }
+    traceCharacterMap();
+  }
+  return true;
+}
+
+void BakedCity::prepare() {
+  info_.assign(geometry_.meshCount(), {});
+  for (size_t i = 0; i < info_.size(); i++) {
+    const auto& m = geometry_.mesh(i);
+    const auto& so = city_.programs.manifest["shadowObjects"][Json::ArrayIndex(i)];
+    MeshInfo& info = info_[i];
+    info.name = m["name"].asString();
+    info.skip = m["dynamic"].asBool() || info.name.ends_with(" super");
+    info.instanced = m["instanced"].asBool();
+    info.instanceCount = m["instanceCount"].asInt();
+    info.layers = m["layers"].asUInt(); info.shadowLayers = so["layers"].asUInt();
+    info.minCascade = so["minCascade"].asInt(); info.maxCascade = so["maxCascade"].asInt();
+    info.frustumCulled = so["frustumCulled"].asBool(); info.geometryInstances = so["geometryInstances"].asInt();
+    info.receiveShadow = m["receiveShadow"].asBool();
+    info.transparent = geometry_.material(m["material"][0].asUInt())["transparent"].asBool();
+    info.renderOrder = m["renderOrder"].asInt();
+    info.first = m["drawRange"][0].asUInt(); info.count = m["drawRange"][1].asUInt();
+    info.hasIndex = !m["index"].isNull();
+    if (info.hasIndex) info.indexType = arrayType(geometry_.blob(m["index"]["blob"].asUInt())["arrayType"].asString());
+    for (const auto& g : m["groups"]) info.groups.push_back({g["start"].asUInt(), g["count"].asUInt(), g["materialIndex"].asUInt()});
+    info.pool = pools_.forMesh(i);
+    for (int j = 0; j < 16; j++) info.model.m[j] = m["matrixWorld"][j].asFloat();
+    const Vec3 mn = vec(m["bounds"][0]), mx = vec(m["bounds"][1]);
+    info.lo = {INF, INF, INF}; info.hi = {-INF, -INF, -INF};
+    for (int j = 0; j < 8; j++) {
+      const Vec3 q = info.model.transformPoint({j & 1 ? mx.x : mn.x, j & 2 ? mx.y : mn.y, j & 4 ? mx.z : mn.z});
+      info.lo = {std::min(info.lo.x, q.x), std::min(info.lo.y, q.y), std::min(info.lo.z, q.z)};
+      info.hi = {std::max(info.hi.x, q.x), std::max(info.hi.y, q.y), std::max(info.hi.z, q.z)};
+    }
+  }
+}
+
+BakedCity::UsagePlan* BakedCity::plan(Library& lib, int usageIndex) {
+  if (lib.plans.empty()) lib.plans.assign(lib.programs.manifest["usages"].size(), {});
+  if (usageIndex < 0 || usageIndex >= int(lib.plans.size())) return nullptr;
+  UsagePlan& p = lib.plans[usageIndex];
+  if (p.ready) return &p;
+  const auto& usage = lib.programs.manifest["usages"][usageIndex];
+  p.shader = lib.programs.get(usage["id"].asString()); if (!p.shader) return nullptr;
+  Shader& sh = *p.shader; sh.use();
+  p.state = &usage["renderState"];
+  p.uniforms.build(sh, usage["uniformValues"]);
+  p.modelMatrix = sh.loc("modelMatrix"); p.modelViewMatrix = sh.loc("modelViewMatrix");
+  p.projectionMatrix = sh.loc("projectionMatrix"); p.viewMatrix = sh.loc("viewMatrix"); p.normalMatrix = sh.loc("normalMatrix");
+  p.cameraPosition = sh.loc("cameraPosition"); p.isOrthographic = sh.loc("isOrthographic"); p.receiveShadow = sh.loc("receiveShadow");
+  p.shadowMatrix = sh.loc("directionalShadowMatrix[0]"); p.csmParams = sh.loc("csmData.params"); p.lodFrame = sh.loc("uLodFrame");
+  p.lightDirection = sh.loc("directionalLights[0].direction"); p.uTime = sh.loc("uTime"); p.time = sh.loc("time"); p.uSun = sh.loc("uSun");
+  for (int j = 0; j < UsagePlan::MAX_CASCADES; j++) {
+    const std::string prefix = "directionalLightShadows[" + std::to_string(j) + "].";
+    p.shadowBias[j] = sh.loc((prefix + "shadowBias").c_str()); p.shadowNormalBias[j] = sh.loc((prefix + "shadowNormalBias").c_str());
+    p.shadowRadius[j] = sh.loc((prefix + "shadowRadius").c_str()); p.shadowIntensity[j] = sh.loc((prefix + "shadowIntensity").c_str());
+    p.shadowMapSize[j] = sh.loc((prefix + "shadowMapSize").c_str());
+  }
+  // samplers take consecutive units in active-uniform order; the unit assignment is fixed per program
+  const auto& tex = lib.textures["bindings"][usageIndex]["uniforms"];
+  GLint uniforms = 0; glGetProgramiv(sh.id, GL_ACTIVE_UNIFORMS, &uniforms);
+  int unit = 0;
+  for (GLint u = 0; u < uniforms; u++) {
+    char name[256]; GLsizei len; GLint size; GLenum type;
+    glGetActiveUniform(sh.id, u, sizeof(name), &len, &size, &type, name);
+    GLenum target = 0;
+    if (type == GL_SAMPLER_2D || type == GL_SAMPLER_2D_SHADOW) target = GL_TEXTURE_2D;
+    else if (type == GL_SAMPLER_2D_ARRAY) target = GL_TEXTURE_2D_ARRAY;
+    else if (type == GL_SAMPLER_3D) target = GL_TEXTURE_3D;
+    else if (type == GL_SAMPLER_CUBE) target = GL_TEXTURE_CUBE_MAP;
+    if (!target) continue;
+    TextureSlot t; t.name = name; t.target = target; t.size = size; t.shadowSampler = type == GL_SAMPLER_2D_SHADOW;
+    t.env = t.name == "envMap" && target == GL_TEXTURE_2D;
+    t.shadowMaps = t.shadowSampler && t.name == "directionalShadowMap[0]";
+    if (tex.isMember(name)) t.textureId = tex[name].asInt();
+    std::vector<GLint> units(size); for (auto& v : units) v = unit++;
+    glUniform1iv(sh.loc(name), size, units.data());
+    p.textures.push_back(std::move(t));
+  }
+  p.ready = true;
+  return &p;
+}
+
+void BakedCity::beginPass(const Camera& camera, const Mat4& view, const Mat4& proj, float time, int cascade) {
+  PassState& ps = pass_;
+  ps.shadow = cascade >= 0; ps.cascade = cascade; ps.view = view; ps.proj = proj; ps.time = time;
+  ps.cascades = int(csm_.cascades.size()); ps.lights = ps.cascades + (charCascade_ ? 1 : 0);
+  ps.lodFrame = float(std::fmod((csm_.frame % 64) * 0.618034, 1.0));
+  ps.lightDirection = view.transformDir(sunDirection_);
+  ps.eye = cascade >= 0 ? (cascade < ps.cascades ? csm_.cascades[cascade].position : charLight_.position) : camera.position;
+  if (!ps.shadow) {
+    for (int j = 0; j < ps.cascades; j++) ps.shadowMatrices[j] = csm_.cascades[j].matrix;
+    if (charCascade_) {
+      if (charMap_) ps.shadowMatrices[ps.cascades] = charLight_.matrix;
+      else { // no player model: move the character cascade outside coverage
+        Mat4 outside; outside.m[12] = outside.m[13] = outside.m[14] = 2; ps.shadowMatrices[ps.cascades] = outside;
+      }
+    }
+  }
+}
+
+// Every uniform and sampler of one captured program for one object (three.js WebGLRenderer.setProgram equivalent).
+bool BakedCity::setupDraw(Library& lib, UsagePlan& p, const Mat4& model, bool receiveShadow) {
+  const PassState& ps = pass_;
+  Shader& sh = *p.shader;
+  sh.use(); p.uniforms.upload();
+  const Mat4 mv = ps.view * model, inv = mv.inverse(); float normal[9];
+  for (int c = 0; c < 3; c++) for (int r = 0; r < 3; r++) normal[c * 3 + r] = inv.at(c, r);
+  glUniformMatrix4fv(p.modelMatrix, 1, GL_FALSE, model.m); glUniformMatrix4fv(p.modelViewMatrix, 1, GL_FALSE, mv.m);
+  glUniformMatrix4fv(p.projectionMatrix, 1, GL_FALSE, ps.proj.m); glUniformMatrix4fv(p.viewMatrix, 1, GL_FALSE, ps.view.m);
+  glUniformMatrix3fv(p.normalMatrix, 1, GL_FALSE, normal);
+  glUniform3f(p.cameraPosition, ps.eye.x, ps.eye.y, ps.eye.z); glUniform1i(p.isOrthographic, ps.shadow ? 1 : 0);
+  glUniform1i(p.receiveShadow, receiveShadow ? 1 : 0);
+  if (!ps.shadow) {
+    for (int j = 0; j < ps.cascades + (charMap_ ? 1 : 0); j++) {
+      const BakedCascade& c = j < ps.cascades ? csm_.cascades[j] : charLight_;
+      glUniform1f(p.shadowBias[j], c.bias); glUniform1f(p.shadowNormalBias[j], c.normalBias);
+      glUniform1f(p.shadowRadius[j], c.radius); glUniform1f(p.shadowIntensity[j], 1.f);
+      glUniform2f(p.shadowMapSize[j], float(c.size), float(c.size));
+    }
+    glUniformMatrix4fv(p.shadowMatrix, ps.lights, GL_FALSE, ps.shadowMatrices[0].m);
+    glUniform4f(p.csmParams, ps.lodFrame, 0.06f, 1.f, 0.f);
+    glUniform4f(p.lodFrame, ps.lodFrame, 0.06f, 1.f, 0.f);
+  }
+  glUniform3f(p.lightDirection, ps.lightDirection.x, ps.lightDirection.y, ps.lightDirection.z);
+  glUniform1f(p.uTime, ps.time); glUniform1f(p.time, ps.time);
+  glUniform3f(p.uSun, sunDirection_.x, sunDirection_.y, sunDirection_.z);
+  applyState(*p.state);
+  int unit = 0;
+  for (const TextureSlot& ts : p.textures) {
+    for (int element = 0; element < ts.size; element++) {
+      glActiveTexture(GL_TEXTURE0 + unit++);
+      if (ts.env) { glBindTexture(ts.target, environment_.environment()); continue; }
+      if (ts.name == "boneTexture") { glBindTexture(ts.target, boneTex_); continue; }
+      Texture* t = ts.textureId >= 0 ? texture(lib, ts.textureId) : nullptr;
+      if (!t && ts.textureId >= 0 && !lib.textures["textures"][ts.textureId]["file"].isNull()) {
+        std::fprintf(stderr, "[baked-city] cannot upload texture %d (%s)\n", ts.textureId, ts.name.c_str()); return false;
+      }
+      if (ts.shadowMaps) {
+        if (element < int(shadowMaps_.size())) t = &shadowMaps_[element];
+        else if (element == int(shadowMaps_.size()) && charMap_) { glBindTexture(ts.target, charMap_); continue; }
+      }
+      if (!t) t = &placeholder(ts.target, ts.shadowSampler);
+      if (t->target != ts.target) return false;
+      glBindTexture(ts.target, t->id);
+    }
   }
   return true;
 }
 
 bool BakedCity::renderPass(const Camera& camera, const Mat4& view, const Mat4& proj, const Frustum& frustum, float time, int cascade) {
+  if (info_.empty()) prepare();
   const bool shadow = cascade >= 0;
   const auto& allBindings = shadow ? depthBindings_ : bindings_;
-  std::vector<size_t> visible;
-  for (size_t i = 0; i < geometry_.meshCount(); i++) {
-    const auto& m = geometry_.mesh(i); std::string name = m["name"].asString();
-    BakedPool* pool = pools_.forMesh(i);
-    const auto& shadowMeta = programs_.manifest["shadowObjects"][Json::ArrayIndex(i)];
-    uint32_t layers = shadow ? shadowMeta["layers"].asUInt() : m["layers"].asUInt();
-    uint32_t mask = shadow && cascade == 2 ? 1u | (1u << 29) : 1u;
-    if (!(layers & mask) || m["dynamic"].asBool() || name.ends_with(" super") ||
-        (m["instanced"].asBool() && (pool ? (shadow ? pool->shadowCount : pool->count) == 0 : m["instanceCount"].asInt() == 0))) continue;
-    if (shadow && (!visibility_.at(i).shadow || cascade < shadowMeta["minCascade"].asInt() || cascade > shadowMeta["maxCascade"].asInt())) continue;
-    if (!pool && !visibility_.at(i).visible) continue;
-    Mat4 model; for (int j = 0; j < 16; j++) model.m[j] = m["matrixWorld"][j].asFloat();
-    Vec3 mn = vec(m["bounds"][0]), mx = vec(m["bounds"][1]);
-    Vec3 lo{INF, INF, INF}, hi{-INF, -INF, -INF};
-    for (int j = 0; j < 8; j++) { Vec3 p = model.transformPoint({j & 1 ? mx.x : mn.x, j & 2 ? mx.y : mn.y, j & 4 ? mx.z : mn.z});
-      lo.x = std::min(lo.x, p.x); lo.y = std::min(lo.y, p.y); lo.z = std::min(lo.z, p.z);
-      hi.x = std::max(hi.x, p.x); hi.y = std::max(hi.y, p.y); hi.z = std::max(hi.z, p.z); }
-    if (!m["instanced"].asBool() && shadowMeta["frustumCulled"].asBool() && !frustum.visible(lo, hi)) continue;
+  static std::vector<size_t> visible; visible.clear();
+  for (size_t i = 0; i < info_.size(); i++) {
+    const MeshInfo& m = info_[i];
+    if (m.skip) continue;
+    const uint32_t layers = shadow ? m.shadowLayers : m.layers;
+    // render/csm.js camera layers: cascade 2 adds the shadow proxies (29), cascades >= 3 see big casters only (28)
+    const uint32_t mask = !shadow || cascade < 2 ? 1u : cascade == 2 ? 1u | (1u << 29) : 1u << 28;
+    if (!(layers & mask) || (m.instanced && (m.pool ? (shadow ? m.pool->shadowCount : m.pool->count) == 0 : m.instanceCount == 0))) continue;
+    if (shadow && (!visibility_.at(i).shadow || cascade < m.minCascade || cascade > m.maxCascade)) continue;
+    if (!m.pool && !visibility_.at(i).visible) continue;
+    if (!m.instanced && m.frustumCulled && !frustum.visible(m.lo, m.hi)) continue;
     visible.push_back(i);
   }
   std::stable_sort(visible.begin(), visible.end(), [&](size_t a, size_t b) {
-    const auto& x = geometry_.mesh(a); const auto& y = geometry_.mesh(b);
-    bool xt = geometry_.material(x["material"][0].asUInt())["transparent"].asBool();
-    bool yt = geometry_.material(y["material"][0].asUInt())["transparent"].asBool();
-    if (xt != yt) return !xt;
-    return x["renderOrder"].asInt() < y["renderOrder"].asInt();
+    const MeshInfo& x = info_[a]; const MeshInfo& y = info_[b];
+    if (x.transparent != y.transparent) return !x.transparent;
+    return x.renderOrder < y.renderOrder;
   });
+  static const bool checkErrors = std::getenv("SB_GLDEBUG") != nullptr;
+  beginPass(camera, view, proj, time, cascade);
   for (size_t i : visible) {
-    const auto& m = geometry_.mesh(i);
-    const auto& shadowMeta = programs_.manifest["shadowObjects"][Json::ArrayIndex(i)];
+    const MeshInfo& m = info_[i];
     for (size_t slot = 0; slot < allBindings[i].size(); slot++) {
-      int usageIndex = allBindings[i][slot]; if (usageIndex < 0) return false;
-      const auto& usage = programs_.manifest["usages"][usageIndex];
-      Shader* shader = programs_.get(usage["id"].asString()); if (!shader) return false;
-      shader->use(); setUniforms(*shader, usage["uniformValues"]);
-      Mat4 model; for (int j = 0; j < 16; j++) model.m[j] = m["matrixWorld"][j].asFloat();
-      Mat4 mv = view * model, inv = mv.inverse(); float normal[9];
-      for (int c = 0; c < 3; c++) for (int r = 0; r < 3; r++) normal[c * 3 + r] = inv.at(c, r);
-      shader->set("modelMatrix", model); shader->set("modelViewMatrix", mv);
-      shader->set("projectionMatrix", proj); shader->set("viewMatrix", view);
-      glUniformMatrix3fv(shader->loc("normalMatrix"), 1, GL_FALSE, normal);
-      shader->set("cameraPosition", shadow ? csm_.cascades[cascade].position : camera.position); shader->set("isOrthographic", shadow ? 1 : 0);
-      shader->set("receiveShadow", m["receiveShadow"].asBool() ? 1 : 0);
-      if (!shadow) {
-        Mat4 matrices[4];
-        for (int j = 0; j < 3; j++) {
-          const auto& c = csm_.cascades[j]; matrices[j] = c.matrix;
-          const std::string prefix = "directionalLightShadows[" + std::to_string(j) + "].";
-          shader->set((prefix + "shadowBias").c_str(), c.bias);
-          shader->set((prefix + "shadowNormalBias").c_str(), c.normalBias);
-          shader->set((prefix + "shadowRadius").c_str(), c.radius);
-          shader->set((prefix + "shadowIntensity").c_str(), 1.f);
-          glUniform2f(shader->loc((prefix + "shadowMapSize").c_str()), float(c.size), float(c.size));
-        }
-        // No player in the inspection camera: move the character cascade outside coverage.
-        matrices[3].m[12] = 2; matrices[3].m[13] = 2; matrices[3].m[14] = 2;
-        shader->setMats("directionalShadowMatrix[0]", matrices, 4);
-        shader->set("csmData.params", float(std::fmod((csm_.frame % 64) * 0.618034, 1.0)), 0.06f, 1.f, 0.f);
-        shader->set("uLodFrame", float(std::fmod((csm_.frame % 64) * 0.618034, 1.0)), 0.06f, 1.f, 0.f);
-      }
-      shader->set("directionalLights[0].direction", view.transformDir(vec(programs_.manifest["sunDirection"])));
-      shader->set("uTime", time); shader->set("time", time);
-      shader->set("uSun", vec(programs_.manifest["sunDirection"]));
-      applyState(usage["renderState"]);
-      int unit = 0;
-      const auto& tex = textures_["bindings"][usageIndex]["uniforms"];
-      GLint uniforms = 0; glGetProgramiv(shader->id, GL_ACTIVE_UNIFORMS, &uniforms);
-      for (GLint u = 0; u < uniforms; u++) {
-        char name[256]; GLsizei len; GLint size; GLenum type;
-        glGetActiveUniform(shader->id, u, sizeof(name), &len, &size, &type, name);
-        GLenum target = 0;
-        if (type == GL_SAMPLER_2D) target = GL_TEXTURE_2D;
-        else if (type == GL_SAMPLER_2D_SHADOW) target = GL_TEXTURE_2D;
-        else if (type == GL_SAMPLER_2D_ARRAY) target = GL_TEXTURE_2D_ARRAY;
-        else if (type == GL_SAMPLER_3D) target = GL_TEXTURE_3D;
-        else if (type == GL_SAMPLER_CUBE) target = GL_TEXTURE_CUBE_MAP;
-        if (!target) continue;
-        std::vector<GLint> units;
-        for (int element = 0; element < size; element++) {
-          glActiveTexture(GL_TEXTURE0 + unit);
-          if (std::string(name) == "envMap" && target == GL_TEXTURE_2D) {
-            glBindTexture(target, environment_.environment()); units.push_back(unit++); continue;
-          }
-          Texture* t = tex.isMember(name) ? texture(tex[name].asInt()) : nullptr;
-          if (!t && tex.isMember(name) && !textures_["textures"][tex[name].asInt()]["file"].isNull()) {
-            std::fprintf(stderr, "[baked-city] cannot upload texture %d (%s)\n", tex[name].asInt(), name); return false;
-          }
-          if (type == GL_SAMPLER_2D_SHADOW && std::string(name) == "directionalShadowMap[0]" && element < int(shadowMaps_.size())) t = &shadowMaps_[element];
-          if (!t) t = &placeholder(target, type == GL_SAMPLER_2D_SHADOW);
-          if (t->target != target) return false;
-          glBindTexture(target, t->id); units.push_back(unit++);
-        }
-        glUniform1iv(shader->loc(name), size, units.data());
-      }
-      if (!bindMesh(i, *shader)) return false;
+      UsagePlan* p = plan(city_, allBindings[i][slot]); if (!p) return false;
+      Shader& sh = *p->shader;
+      if (!setupDraw(city_, *p, m.model, m.receiveShadow)) return false;
+      if (!bindMesh(i, sh)) return false;
       auto draw = [&](uint32_t start, uint32_t count) {
-        uint32_t first = m["drawRange"][0].asUInt(), last = first + m["drawRange"][1].asUInt();
-        uint32_t end = std::min(start + count, last); start = std::max(start, first); if (end <= start) return;
-        BakedPool* pool = pools_.forMesh(i);
-        GLsizei n = end - start, instances = pool ? (shadow ? pool->shadowCount : pool->count) : m["instanceCount"].asInt();
-        const bool instanced = m["instanced"].asBool() || shadowMeta["geometryInstances"].asInt() > 0;
-        if (!m["instanced"].asBool()) instances = shadowMeta["geometryInstances"].asInt();
-        if (!m["index"].isNull()) {
-          GLenum type = arrayType(geometry_.blob(m["index"]["blob"].asUInt())["arrayType"].asString());
-          void* offset = (void*)(uintptr_t(start) * typeBytes(type));
-          if (instanced) glDrawElementsInstanced(GL_TRIANGLES, n, type, offset, instances);
-          else glDrawElements(GL_TRIANGLES, n, type, offset);
+        const uint32_t last = m.first + m.count;
+        uint32_t end = std::min(start + count, last); start = std::max(start, m.first); if (end <= start) return;
+        GLsizei n = end - start, instances = m.pool ? (shadow ? m.pool->shadowCount : m.pool->count) : m.instanceCount;
+        const bool instanced = m.instanced || m.geometryInstances > 0;
+        if (!m.instanced) instances = m.geometryInstances;
+        if (m.hasIndex) {
+          void* offset = (void*)(uintptr_t(start) * typeBytes(m.indexType));
+          if (instanced) glDrawElementsInstanced(GL_TRIANGLES, n, m.indexType, offset, instances);
+          else glDrawElements(GL_TRIANGLES, n, m.indexType, offset);
         } else if (instanced) glDrawArraysInstanced(GL_TRIANGLES, start, n, instances);
         else glDrawArrays(GL_TRIANGLES, start, n);
         if (shadow) shadowDrawn++;
         else { drawn++; triangles += uint64_t(n / 3) * (instanced ? instances : 1); }
       };
-      if (m["groups"].empty()) draw(m["drawRange"][0].asUInt(), m["drawRange"][1].asUInt());
-      else for (const auto& group : m["groups"]) if (group["materialIndex"].asUInt() == slot) draw(group["start"].asUInt(), group["count"].asUInt());
-      GLenum error = glGetError(); if (error) { std::fprintf(stderr, "[baked-city] GL 0x%x at mesh %zu (%s), program %s\n", error, i, m["name"].asCString(), usage["id"].asCString()); return false; }
+      if (m.groups.empty()) draw(m.first, m.count);
+      else for (const auto& g : m.groups) if (g.slot == slot) draw(g.start, g.count);
+      if (checkErrors) {
+        GLenum error = glGetError();
+        if (error) { std::fprintf(stderr, "[baked-city] GL 0x%x at mesh %zu (%s)\n", error, i, m.name.c_str()); return false; }
+      }
     }
   }
   glDepthMask(GL_TRUE); glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE); glEnable(GL_DEPTH_TEST);
@@ -403,14 +498,19 @@ void BakedCity::evict() {
 void BakedCity::clear() {
   for (auto& m : meshes_) glDeleteVertexArrays(1, &m.second.vao);
   for (auto& b : buffers_) glDeleteBuffers(1, &b.second.id);
-  for (auto& t : textureGpu_) glDeleteTextures(1, &t.second.id);
+  for (Library* lib : {&city_, &char_}) {
+    for (auto& t : lib->gpu) glDeleteTextures(1, &t.second.id);
+    lib->gpu.clear(); lib->plans.clear(); lib->programs.clear(); lib->textures.clear(); lib->directory.clear();
+  }
+  clearCharacter();
   for (auto& t : placeholders_) glDeleteTextures(1, &t.second.id);
   for (auto& t : shadowMaps_) glDeleteTextures(1, &t.id);
   if (shadowFbo_) glDeleteFramebuffers(1, &shadowFbo_);
   shadowFbo_ = 0; shadowMaps_.clear();
   placeholders_.clear();
-  meshes_.clear(); buffers_.clear(); textureGpu_.clear(); bindings_.clear(); depthBindings_.clear();
+  meshes_.clear(); buffers_.clear(); bindings_.clear(); depthBindings_.clear();
   pools_.clear();
   environment_.clear();
-  programs_.clear(); textures_.clear(); residentBytes = 0; frame_ = 0;
+  residentBytes = 0; frame_ = 0;
+  info_.clear();
 }

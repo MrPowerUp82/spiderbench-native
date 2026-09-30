@@ -1,4 +1,5 @@
 #include "gfx/renderer.h"
+#include <SDL.h>
 #include "gfx/baked_city.h"
 #include "gfx/shaders.h"
 #include "gfx/texture.h"
@@ -231,10 +232,22 @@ static void glCheck(const char* where) {
 
 void Renderer::render(const FrameInput& f) {
   Camera cam = *f.cam;
+  // SB_PROFILE=2: GPU time per phase (glFinish between phases; slows the frame down, for measurement only)
+  static const bool gpuProfile = std::getenv("SB_PROFILE") && std::atoi(std::getenv("SB_PROFILE")) == 2;
+  static double phaseMs[4] = {0, 0, 0, 0}; static int phaseFrames = 0;
+  uint64_t mark = 0;
+  auto phase = [&](int k) {
+    if (!gpuProfile) return;
+    glFinish(); const uint64_t now = SDL_GetPerformanceCounter();
+    if (k >= 0) phaseMs[k] += (now - mark) * 1000.0 / SDL_GetPerformanceFrequency();
+    mark = now;
+  };
+  phase(-1);
   glCheck("frame start");
   computeCascades(cam);
   // ---- shadow pass
   if (f.bakedCity) {
+    f.bakedCity->setCharacter(f.rig, f.characterVisible && f.rig, f.focus);
     f.bakedCity->healthy = f.bakedCity->drawShadows(cam, f.time);
     if (!f.bakedCity->healthy) return;
   } else {
@@ -256,6 +269,7 @@ void Renderer::render(const FrameInput& f) {
     glDisable(GL_POLYGON_OFFSET_FILL);
   }
   glCheck("shadows");
+  phase(0);
 
   // ---- HDR forward pass
   if (f.bakedCity) cam.projectionJitter = f.bakedCity->jitter(w_, h_);
@@ -276,6 +290,7 @@ void Renderer::render(const FrameInput& f) {
     glBindVertexArray(emptyVao_); glDrawArrays(GL_TRIANGLES, 0, 3);
   }
   glCheck("sky");
+  phase(1);
   glEnable(GL_DEPTH_TEST);
   glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D_ARRAY, shadowTex_);
   // city + far shores
@@ -298,8 +313,10 @@ void Renderer::render(const FrameInput& f) {
     glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, tWaterN_); water_.set("tWaterN", 1);
     glBindVertexArray(waterVao_); glDrawArrays(GL_TRIANGLES, 0, 6);
   }
-  // character
-  if (f.characterVisible) {
+  // character: the original programs with the original city, else the native skin shader
+  if (f.bakedCity && f.bakedCity->hasCharacter()) {
+    f.bakedCity->healthy = f.bakedCity->healthy && f.bakedCity->drawCharacter(cam, f.time);
+  } else if (f.characterVisible) {
     glDisable(GL_CULL_FACE);
     skin_.use(); setCommon(skin_, cam, f.time); skin_.set("uViewProj", vp); skin_.set("uView", view);
     skin_.set("tBase", 1); skin_.set("tOrm", 2); skin_.set("tNormal", 3);
@@ -307,6 +324,7 @@ void Renderer::render(const FrameInput& f) {
   }
   drawWebs(f, vp);
   glCheck("forward");
+  phase(2);
   if (f.bakedCity && std::getenv("SB_BAKE_TRACE")) {
     std::vector<float> pixels(size_t(w_) * h_ * 4);
     glReadPixels(0, 0, w_, h_, GL_RGBA, GL_FLOAT, pixels.data());
@@ -334,6 +352,12 @@ void Renderer::render(const FrameInput& f) {
   if (f.bakedCity) {
     f.bakedCity->healthy = f.bakedCity->healthy && f.bakedCity->drawPost(cam, w_, h_, hdrColor_, hdrDepth_, f.dt);
     glCheck("original post");
+    phase(3);
+    if (gpuProfile && ++phaseFrames == 30) {
+      std::printf("[gpu] shadows %.1f ms, sky %.1f ms, forward %.1f ms, post %.1f ms\n", phaseMs[0] / 30, phaseMs[1] / 30, phaseMs[2] / 30, phaseMs[3] / 30);
+      for (double& v : phaseMs) v = 0;
+      phaseFrames = 0;
+    }
     return;
   }
   glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);

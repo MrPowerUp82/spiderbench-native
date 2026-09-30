@@ -7,7 +7,9 @@ import struct
 import sys
 
 assert sys.byteorder == "little" and array("f").itemsize == 4 and array("I").itemsize == 4
-root = Path(__file__).resolve().parents[2] / "build" / "city-bake"
+import os
+quality = os.environ.get("SB_QUALITY", "")
+root = Path(os.environ.get("SB_BAKE_DIR") or Path(__file__).resolve().parents[2] / "build" / ("city-bake" + ("-" + quality if quality and quality != "med" else "")))
 manifest = json.loads((root / "collision.json").read_text())
 oracle = json.loads((root / "queries.json").read_text())["queries"]
 
@@ -48,6 +50,7 @@ assert (n, nf, nzips, nboxes, nx, nz, ni) == (
     manifest["buildingBoxes"], manifest["grid"]["nx"],
     manifest["grid"]["nz"], manifest["grid"]["items"])
 assert start[-1] == ni and len(zip_pos) == nzips * 6 and len(box_pos) == nboxes * 6
+assert all(math.isfinite(v) for v in zip_pos) and all(math.isfinite(v) for v in box_pos), "non-finite zip point or building box"
 assert sum(len(a[3]) for a in fields) == manifest["fieldCells"]
 
 def top(i, x, z):

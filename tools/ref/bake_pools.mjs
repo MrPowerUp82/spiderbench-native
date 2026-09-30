@@ -1,5 +1,6 @@
 // Capture distance-culled Pool item lists before their InstancedMesh buffers are
 // repacked for one camera position. These lists are the source for native LODs.
+import { BAKE, SHADERS } from './paths.mjs';
 import { renderer, SRC_ROOT } from './stubs.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -39,7 +40,7 @@ const items = [...pools].map((p, id) => {
 const raw = Buffer.from(JSON.stringify({ format: 'SBPOOL1', version: 1, source: SRC_ROOT,
   threeRevision: THREE.REVISION, pools: items }));
 const compressed = zlib.gzipSync(raw, { level: 6 });
-const dir = path.resolve('build/city-bake');
+const dir = BAKE;
 fs.mkdirSync(dir, { recursive: true });
 fs.writeFileSync(path.join(dir, 'pools.json.gz'), compressed);
 const summary = { format: 'SBPOOL1', version: 1, source: SRC_ROOT,

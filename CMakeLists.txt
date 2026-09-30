@@ -75,28 +75,37 @@ add_custom_target(verify_baked_environment
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   COMMENT "Replaying and validating the original sky and PMREM passes on the native GPU")
 
-# Explicit bake step for the faithful JS city. Run with `cmake --build build --target bake_city`.
-# Each command builds the original city once; keep them serial to avoid holding
-# multiple copies of its ~3 GiB scene in memory at the same time.
+# Explicit bake step for the faithful JS city. Run with `cmake --build build --target bake_city` (the remake's med
+# preset, build/city-bake + build/refshaders) or `--target bake_city_low` (its low preset for integrated GPUs,
+# build/city-bake-low + build/refshaders-low). Each command builds the original city once; keep them serial to avoid
+# holding multiple copies of its ~3 GiB scene in memory at the same time.
 find_program(SB_NODE_EXECUTABLE NAMES node)
 find_program(SB_PYTHON_EXECUTABLE NAMES python python3)
-if(SB_NODE_EXECUTABLE AND SB_PYTHON_EXECUTABLE)
-  add_custom_target(bake_city
-    COMMAND "${SB_NODE_EXECUTABLE}" --max-old-space-size=8192 tools/ref/bake_collision.mjs
-    COMMAND "${SB_NODE_EXECUTABLE}" --max-old-space-size=8192 tools/ref/bake_geometry.mjs
-    COMMAND "${SB_NODE_EXECUTABLE}" --max-old-space-size=8192 tools/ref/bake_pools.mjs
-    COMMAND "${SB_NODE_EXECUTABLE}" --max-old-space-size=4096 tools/ref/pack_pools.mjs
-    COMMAND "${SB_NODE_EXECUTABLE}" --max-old-space-size=4096 tools/ref/verify_pool_data.mjs
-    COMMAND "${SB_NODE_EXECUTABLE}" --max-old-space-size=8192 tools/ref/capture_shaders.mjs --city
-    COMMAND "${SB_NODE_EXECUTABLE}" tools/ref/capture_environment.mjs
-    COMMAND "${SB_NODE_EXECUTABLE}" tools/ref/verify_environment.mjs
-    COMMAND "${SB_NODE_EXECUTABLE}" tools/ref/verify_csm.mjs
-    COMMAND "${SB_NODE_EXECUTABLE}" --max-old-space-size=8192 tools/ref/verify_tiles.mjs
-    COMMAND "${SB_PYTHON_EXECUTABLE}" tools/ref/verify_collision.py
-    COMMAND "${SB_NODE_EXECUTABLE}" tools/ref/verify_geometry.mjs
-    COMMAND "${SB_NODE_EXECUTABLE}" --max-old-space-size=4096 tools/ref/verify_pools.mjs
-    COMMAND "${SB_NODE_EXECUTABLE}" tools/ref/verify_bake_links.mjs
-    COMMAND "${SB_NODE_EXECUTABLE}" tools/ref/verify_textures.mjs
+function(sb_bake_target target quality)
+  set(node "${CMAKE_COMMAND}" -E env "SB_QUALITY=${quality}" "${SB_NODE_EXECUTABLE}")
+  set(py "${CMAKE_COMMAND}" -E env "SB_QUALITY=${quality}" "${SB_PYTHON_EXECUTABLE}")
+  add_custom_target(${target}
+    COMMAND ${node} --max-old-space-size=8192 tools/ref/bake_collision.mjs
+    COMMAND ${node} --max-old-space-size=8192 tools/ref/bake_traversal.mjs
+    COMMAND ${node} --max-old-space-size=8192 tools/ref/bake_geometry.mjs
+    COMMAND ${node} --max-old-space-size=8192 tools/ref/bake_pools.mjs
+    COMMAND ${node} --max-old-space-size=4096 tools/ref/pack_pools.mjs
+    COMMAND ${node} --max-old-space-size=4096 tools/ref/verify_pool_data.mjs
+    COMMAND ${node} --max-old-space-size=8192 tools/ref/capture_shaders.mjs --city
+    COMMAND ${node} --max-old-space-size=4096 tools/ref/capture_shaders.mjs --character
+    COMMAND ${node} tools/ref/capture_environment.mjs
+    COMMAND ${node} tools/ref/verify_environment.mjs
+    COMMAND ${node} tools/ref/verify_csm.mjs
+    COMMAND ${node} --max-old-space-size=8192 tools/ref/verify_tiles.mjs
+    COMMAND ${py} tools/ref/verify_collision.py
+    COMMAND ${node} tools/ref/verify_geometry.mjs
+    COMMAND ${node} --max-old-space-size=4096 tools/ref/verify_pools.mjs
+    COMMAND ${node} tools/ref/verify_bake_links.mjs
+    COMMAND ${node} tools/ref/verify_textures.mjs
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    COMMENT "Baking and validating the original Spiderbench city")
+    COMMENT "Baking and validating the original Spiderbench city (${quality} preset)")
+endfunction()
+if(SB_NODE_EXECUTABLE AND SB_PYTHON_EXECUTABLE)
+  sb_bake_target(bake_city med)
+  sb_bake_target(bake_city_low low)
 endif()

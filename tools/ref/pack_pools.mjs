@@ -1,5 +1,6 @@
 // Compact the preserved Pool items into the same independently compressed
 // buffer archive used by geometry. Does not rebuild the city.
+import { BAKE, SHADERS } from './paths.mjs';
 import { SRC_ROOT } from './stubs.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -7,7 +8,7 @@ import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 const THREE = await import(pathToFileURL(path.join(SRC_ROOT, 'node_modules/three/build/three.module.js')).href);
-const dir = path.resolve('build/city-bake');
+const dir = BAKE;
 const source = JSON.parse(zlib.gunzipSync(fs.readFileSync(path.join(dir, 'pools.json.gz'))));
 if (source.format !== 'SBPOOL1' || source.version !== 1) throw new Error('Invalid pool source');
 const blobs = [], meshes = [], hashes = new Map();
