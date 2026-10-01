@@ -47,7 +47,7 @@ struct App {
   float fps = 60, time = 0, districtT = 0;
   std::string district;
   // test mode
-  bool test = false; float testLen = 14; int testScene = 0; std::string outDir = ".";
+  bool test = false; float testLen = 14; int testScene = 0; std::string outDir = "."; float cam[6] = {0}, camFov = 0; bool hasCam = false; // --cam x,y,z,tx,ty,tz (web: ?cam=)
 };
 
 bool saveScreenshot(App& a, const std::string& path) {
@@ -180,6 +180,8 @@ int viewBake(App& a, const std::string& directory, const std::string& shaders) {
   a.camera.position = {250, 32, 175}; a.camera.lookAt({250, 8, -250}); a.camera.aspect = float(a.w) / a.h;
   if (a.testScene == 2) { a.camera.position = {0, 70, -600}; a.camera.lookAt({0, 30, -1400}); }
   if (a.testScene == 3) { a.camera.position = {120, 100, 2760}; a.camera.lookAt({80, 50, 2200}); }
+  if (a.hasCam) { a.camera.position = {a.cam[0], a.cam[1], a.cam[2]}; a.camera.lookAt({a.cam[3], a.cam[4], a.cam[5]}); }
+  if (a.camFov > 0) a.camera.fov = a.camFov; // player/camera.js sets the web camera FOV (58 deg base)
   uint64_t last = SDL_GetPerformanceCounter(); int frames = 0;
   if (a.test) std::filesystem::create_directories(a.outDir);
   while (a.running) {
@@ -208,7 +210,8 @@ int viewBake(App& a, const std::string& directory, const std::string& shaders) {
     a.renderer.render(frame);
     if (!city.healthy) { city.clear(); return 1; }
     if (frames == 0) std::printf("[baked-city] %zu draws, %zu shadow draws, %llu triangles, %.1f MiB vertex/index buffers\n", city.drawn, city.shadowDrawn, (unsigned long long)city.triangles, city.residentBytes / 1048576.0);
-    if (a.test && frames == 1) { if (!saveScreenshot(a, a.outDir + "/baked_city.bmp")) { city.clear(); return 1; } a.running = false; }
+    // shots.js renders 90 frames before the capture (TAA history and auto exposure settle); match it for --cam
+    if (a.test && frames == (a.hasCam ? 89 : 1)) { if (!saveScreenshot(a, a.outDir + "/baked_city.bmp")) { city.clear(); return 1; } a.running = false; }
     SDL_GL_SwapWindow(a.win); frames++;
   }
   city.clear(); return 0;
@@ -232,6 +235,9 @@ int main(int argc, char** argv) {
     if (!std::strcmp(argv[i], "--test")) { a.test = true; a.help = std::getenv("SB_HELP") != nullptr; if (i + 1 < argc && argv[i + 1][0] != '-') a.testLen = (float)std::atof(argv[++i]); }
     else if (!std::strcmp(argv[i], "--out") && i + 1 < argc) a.outDir = argv[++i];
     else if (!std::strcmp(argv[i], "--scene") && i + 1 < argc) a.testScene = std::atoi(argv[++i]);
+    else if (!std::strcmp(argv[i], "--fov") && i + 1 < argc) a.camFov = float(std::atof(argv[++i]));
+    else if (!std::strcmp(argv[i], "--cam") && i + 1 < argc)
+      a.hasCam = std::sscanf(argv[++i], "%f,%f,%f,%f,%f,%f", &a.cam[0], &a.cam[1], &a.cam[2], &a.cam[3], &a.cam[4], &a.cam[5]) == 6;
     else if (!std::strcmp(argv[i], "--validate-baked-shaders")) validateBake = true;
     else if (!std::strcmp(argv[i], "--validate-baked-pools")) validatePools = true;
     else if (!std::strcmp(argv[i], "--validate-baked-csm")) validateCSM = true;

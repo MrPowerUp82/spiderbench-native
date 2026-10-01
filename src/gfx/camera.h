@@ -5,7 +5,7 @@
 struct Camera {
   Vec3 position{0, 5, 10};
   Quat quaternion;
-  float fov = 55, aspect = 16.f / 9, zNear = 0.1f, zFar = 20000;
+  float fov = 55, aspect = 16.f / 9, zNear = 0.1f, zFar = 150000; // main.js PerspectiveCamera(55, aspect, 0.1, 150000)
   Vec2 projectionJitter; // NDC offset, zero outside the baked TAA path
   void lookAt(const Vec3& target, const Vec3& up = UP) {
     Vec3 z = (position - target).normalized(); // camera +Z points away from the target
